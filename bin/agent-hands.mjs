@@ -4,11 +4,11 @@
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error.
 
 import { CDP, devtoolsPort, profileDir, browserInfo } from '../cli/cdp.mjs';
-import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, readPos, KEYS } from '../cli/gestures.mjs';
+import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const USAGE = `agent-hands ${VERSION} — human-rate input for an agent-browser session
 
@@ -16,15 +16,15 @@ USAGE
   agent-hands <command> [args] [--session <name>] [--speed <n>] [--json]
 
 COMMANDS
-  click <selector>            move along a curve, then click
+  click --ref @e12            target a snapshot ref — most robust, works in iframes
+  click <selector>            target a CSS selector
   click --text "Label"        target by visible text (ranked, best match wins)
-  click --xy <x> <y>          target raw viewport coordinates
-  click --ref @e12            target an agent-browser snapshot ref (works in iframes)
+  click --xy <x> <y>          target raw viewport coordinates (last resort)
   hover <selector>            move onto the element, no click
   move --xy <x> <y>           move only
-  fill <selector> "text"      click the field, then type into it
+  fill <target> "text"        click, select all, replace. --append to keep old text
   type "text"                 type into whatever has focus
-  press <Key>                 ${Object.keys(KEYS).join(' ')}
+  press <Key> [--times n]     ${Object.keys(KEYS).join(' ')}
   scroll <pixels>             negative scrolls up
   where                       print last cursor position
   doctor                      check the session is reachable
@@ -32,7 +32,7 @@ COMMANDS
   skills get core [--full]    print the agent guide
 
 OPTIONS
-  --session <name>   agent-browser session, paired to its profile (default: work)
+  --session <name>   agent-browser session (default: $AGENT_HANDS_SESSION or work)
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
   --json             machine-readable output — for agents
   --quiet            exit code only
@@ -62,13 +62,15 @@ NOTES
   launched without a debugging port; the session then works here.
 
 EXAMPLES
-  agent-hands fill "#searchbox_input" "auto ecole vincennes"
-  agent-hands press Enter
-  agent-hands click --text "Se connecter" --session work-2
+  export AGENT_HANDS_SESSION=work        # then omit --session everywhere
+  agent-browser --session work snapshot -i
+  agent-hands fill --ref @e63 "Auto-école Smoni"    # replaces existing text
+  agent-hands click --ref @e64                      # re-resolves at click time
+  agent-hands press Backspace --times 20
   agent-hands scroll 600 --json`;
 
 function parseArgs(argv) {
-  const out = { session: 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
+  const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--session') out.session = argv[++i];
@@ -79,6 +81,8 @@ function parseArgs(argv) {
     else if (a === '--json') out.json = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--full') out.flags.full = true;
+    else if (a === '--times') out.flags.times = Math.max(1, Number(argv[++i]) || 1);
+    else if (a === '--append') out.flags.append = true;
     else out._.push(a);
   }
   return out;
@@ -144,12 +148,23 @@ async function run(args, cmd, rest) {
       case 'fill': {
         await clickAt(cdp, session, target, target.w, speed);
         await sleep(lognormal(180, 0.4, 500));
-        const t = await typeText(cdp, rest[1] ?? '', speed);
-        return { data: { ...t, tag: target.tag }, human: `✓ fill ${target.tag} at ${at} with ${t.chars} chars / ${t.ms}ms` };
+        const replaced = !args.flags.append;
+        // A click puts the caret where it landed, mid-text. Select all to
+        // overwrite, or jump to the end so --append really appends.
+        if (replaced) await selectAll(cdp);
+        else await pressKey(cdp, 'End', speed);
+        // With --ref or --xy there is no selector positional, so the text is first.
+        const text = (args.flags.ref || hasXY ? rest[0] : rest[1]) ?? '';
+        const t = await typeText(cdp, text, speed);
+        return {
+          data: { ...t, tag: target.tag, replaced },
+          human: `✓ fill ${target.tag} at ${at} — ${replaced ? 'replaced' : 'appended'} ${t.chars} chars / ${t.ms}ms`,
+        };
       }
       case 'press': {
-        const k = await pressKey(cdp, rest[0], speed);
-        return { data: k, human: `✓ press ${k.key}` };
+        const times = args.flags.times ?? 1;
+        for (let i = 0; i < times; i++) await pressKey(cdp, rest[0], speed);
+        return { data: { key: rest[0], times }, human: `✓ press ${rest[0]}${times > 1 ? ` x${times}` : ''}` };
       }
       case 'scroll': {
         const s = await scrollBy(cdp, Number(rest[0] ?? 400), speed);

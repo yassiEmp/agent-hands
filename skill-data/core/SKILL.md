@@ -74,16 +74,21 @@ agent-hands click --text "Se connecter"    # visible text, ranked match
 agent-hands click --xy 420 300             # raw viewport coordinates
 agent-hands hover ".menu-item"
 agent-hands move --xy 200 400
-agent-hands fill "#email" "you@example.com"
+agent-hands fill "#email" "you@example.com"   # replaces existing text
+agent-hands fill --ref @e63 "text"            # with --ref, text is the first arg
+agent-hands fill "#note" " more" --append     # keep old text, append at the end
 agent-hands type "into whatever has focus"
-agent-hands press Enter                    # Tab Escape Backspace Delete Arrow*
+agent-hands press Enter                    # Tab Escape Backspace Delete Home End Arrow*
+agent-hands press Backspace --times 20     # one process, not twenty
 agent-hands scroll 600                     # negative scrolls up
 agent-hands where                          # last cursor position
 agent-hands doctor                         # is the session reachable?
 ```
 
-Flags: `--session <name>` (default `work`), `--speed 1.6` brisk / `0.7` slow,
-`--json` machine-readable, `--quiet` exit code only.
+Flags: `--session <name>`, `--speed 1.6` brisk / `0.7` slow, `--json`
+machine-readable, `--quiet` exit code only.
+
+Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
 
 ## Rules that prevent the common failures
 
@@ -98,8 +103,14 @@ Flags: `--session <name>` (default `work`), `--speed 1.6` brisk / `0.7` slow,
    `agent-browser snapshot -i`.
 2. **Submit with `press Enter`.** Do not hunt for the submit button. Verified:
    `fill "#searchbox_input"` then `press Enter` returns real results.
-3. **`fill` clicks first, `type` does not.** Use `fill` for a named field. Use
-   `type` only when focus is already where you want it.
+3. **`fill` replaces; `type` does not.** `fill` clicks, selects all, then types,
+   so it overwrites the field. Use `--append` to keep the old value; it jumps to
+   the end first, because a click leaves the caret wherever it landed. Never
+   clear a field with a loop of `press Backspace` — use `fill`, or
+   `press Backspace --times n` in one call.
+   `fill` does not verify the target accepts text. Aimed at a link or a div it
+   reports success and types into nothing. Check the value afterwards with
+   `agent-browser snapshot -i`.
 4. **Re-resolve after the page changes.** Selectors are resolved fresh on every
    command, so this is automatic — but re-snapshot before choosing a new one.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to

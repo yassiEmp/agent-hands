@@ -78,6 +78,17 @@ export async function clickAt(cdp, session, to, width, speed) {
 
 // ---------------------------------------------------------- keyboard
 
+// Select the field's whole contents so the next keystroke replaces it.
+// Without this, callers resort to dozens of ArrowRight + Backspace presses,
+// one process each.
+export async function selectAll(cdp) {
+  const base = { key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, nativeVirtualKeyCode: 65, modifiers: 2 };
+  cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
+  await sleep(lognormal(60, 0.3, 160));
+  cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
+  await sleep(lognormal(90, 0.35, 250));
+}
+
 export async function typeText(cdp, text, speed) {
   const t0 = Date.now();
   for (const ch of text) {
@@ -102,6 +113,8 @@ export const KEYS = {
   Escape: { code: 'Escape', key: 'Escape', vk: 27 },
   Backspace: { code: 'Backspace', key: 'Backspace', vk: 8 },
   Delete: { code: 'Delete', key: 'Delete', vk: 46 },
+  End: { code: 'End', key: 'End', vk: 35 },
+  Home: { code: 'Home', key: 'Home', vk: 36 },
   ArrowDown: { code: 'ArrowDown', key: 'ArrowDown', vk: 40 },
   ArrowUp: { code: 'ArrowUp', key: 'ArrowUp', vk: 38 },
   ArrowLeft: { code: 'ArrowLeft', key: 'ArrowLeft', vk: 37 },

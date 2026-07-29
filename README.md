@@ -55,12 +55,17 @@ Requires Node 22 or newer for the built-in `WebSocket`. No dependencies.
 ## Commands
 
 ```
-click <selector>          click --text "Label"       click --xy 420 300
-hover <selector>          move --xy 200 400
-fill <selector> "text"    type "text"                press Enter
-scroll 600                where                      doctor
-skills list               skills get core [--full]
+click --ref @e12          click <selector>           click --text "Label"
+click --xy 420 300        hover <selector>           move --xy 200 400
+fill <target> "text"      fill … --append            type "text"
+press Enter --times n     scroll 600                 where
+doctor                    skills get core [--full]
 ```
+
+`--ref` takes a ref from `agent-browser snapshot -i`. It is the most robust
+target and the only one that reaches inside a cross-origin iframe.
+`fill` replaces the field's contents. Set `AGENT_HANDS_SESSION` to skip
+`--session` on every call.
 
 Flags: `--session <name>` (default `work`), `--speed 1.6` brisk / `0.7` slow,
 `--json`, `--quiet`.
