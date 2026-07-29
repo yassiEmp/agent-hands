@@ -69,6 +69,7 @@ reports that it dispatched the gesture, not that the page reacted.
 
 ```bash
 agent-hands click "#submit"                # css selector — most reliable
+agent-hands click --ref @e12               # snapshot ref — the only thing that works in iframes
 agent-hands click --text "Se connecter"    # visible text, ranked match
 agent-hands click --xy 420 300             # raw viewport coordinates
 agent-hands hover ".menu-item"
@@ -86,6 +87,11 @@ Flags: `--session <name>` (default `work`), `--speed 1.6` brisk / `0.7` slow,
 
 ## Rules that prevent the common failures
 
+0. **Inside an iframe, use `--ref`.** CSS selectors and `--text` are evaluated
+   in page JS, which cannot cross a cross-origin frame boundary. Snapshot refs
+   carry frame context and reach inside. `--ref` scrolls the element into view
+   first, so an element below the fold needs no extra step. Refs go stale on
+   every page change: re-snapshot, then use the new ref.
 1. **Prefer a CSS selector.** `--text` ranks candidates — exact over partial,
    real text over `aria-label`, button over field — but a page with several
    "Search" controls can still resolve the wrong one. Get selectors from
@@ -118,8 +124,23 @@ two agents cannot share a profile. Give each parallel agent its own session.
 
 `agent-hands doctor --session work-2` confirms a slot is live before you use it.
 
+## Check the session before you act
+
+A warm session is not proof of the right browser. `--profile` and `--headed`
+apply at launch only, so a session can be running headless on a throwaway
+directory while the logins sit in the real profile. Clicks then succeed against
+the wrong browser and the only symptom is "not signed in".
+
+`agent-hands doctor` prints the profile path and the real browser string, and
+warns when the browser is headless. Run it before the first gesture of a task.
+
 ## What it does not do
 
+- **Google sign-in is refused outright.** Google rejects any browser with the
+  DevTools protocol attached, with "ce navigateur ... peut-être pas sécurisés".
+  That is a browser check, not a behaviour check, so this tool cannot help.
+  Sign in by hand in a Chrome launched with no debugging port; the session then
+  works here. Do not attempt to defeat the check.
 - It does not defeat Cloudflare Turnstile, DataDome, or PerimeterX. Those also
   fingerprint canvas, WebGL, and TLS. Do not promise a protected site will work.
 - `navigator.webdriver` is hidden by the browser's init script, not by this tool.

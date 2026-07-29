@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { execSync } from 'node:child_process';
 import { rand, sleep, lognormal, moveDuration, bezierPath } from './motion.mjs';
 
 const TICK_MS = 10; // 100Hz dispatch; Chrome coalesces to a 60-125Hz trace
@@ -184,6 +185,60 @@ const BOX = `(el => {
   const r = el.getBoundingClientRect();
   return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, tag: el.tagName };
 })`;
+
+// Resolve an agent-browser snapshot ref (@e12) by asking agent-browser for its
+// box. Refs carry frame context, so this reaches inside cross-origin iframes
+// that `--text` and `--xy` cannot: page JS is blocked there, but CDP is not.
+export function resolveRef(session, ref) {
+  // Validate before building a shell string. agent-browser is a .cmd shim on
+  // Windows, so it needs a shell; an args array plus shell:true is deprecated
+  // and unescaped. Whitelisting both inputs makes interpolation safe.
+  if (!/^[\w.-]+$/.test(session)) {
+    const err = new Error(`invalid session name "${session}"`); err.code = 'EUSAGE'; throw err;
+  }
+  if (!/^@?[a-zA-Z]\d+$/.test(ref)) {
+    const err = new Error(`invalid ref "${ref}". Expected a snapshot ref such as @e12.`);
+    err.code = 'EUSAGE'; throw err;
+  }
+
+  const run = sub => execSync(`agent-browser --session ${session} ${sub} ${ref}`,
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+
+  try { run('scrollintoview'); } catch { /* already in view, or not scrollable */ }
+
+  let out;
+  try {
+    out = run('get box');
+  } catch (e) {
+    const err = new Error(
+      `could not read box for ${ref}. Refs go stale on every page change.\n` +
+      `  fix: agent-browser --session ${session} snapshot -i    then use the new ref.`
+    );
+    err.code = 'ENOTFOUND';
+    throw err;
+  }
+
+  const num = key => {
+    const m = out.match(new RegExp(`${key}:\\s*(-?[\\d.]+)`));
+    return m ? Number(m[1]) : null;
+  };
+  const x = num('x'), y = num('y'), w = num('width') ?? 12, h = num('height') ?? 12;
+  if (x === null || y === null) {
+    const err = new Error(`agent-browser returned no geometry for ${ref}`);
+    err.code = 'ENOTFOUND';
+    throw err;
+  }
+  if (w < 1 || h < 1) {
+    const err = new Error(`${ref} has zero size, so it cannot be clicked. It may be hidden.`);
+    err.code = 'ENOTFOUND';
+    throw err;
+  }
+  return {
+    x: x + w / 2 + rand(-w / 5, w / 5),
+    y: y + h / 2 + rand(-h / 5, h / 5),
+    w, h, tag: ref,
+  };
+}
 
 export async function resolveTarget(cdp, { selector, text }) {
   const finder = text

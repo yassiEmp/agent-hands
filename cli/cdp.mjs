@@ -35,6 +35,21 @@ export function devtoolsPort(session) {
   return fs.readFileSync(file, 'utf8').split('\n')[0].trim();
 }
 
+// Ground truth about the running browser. `Browser.getBrowserCommandLine`
+// returns an empty list here, so the version string is the honest signal.
+// A headless session on a pooled profile silently breaks logins.
+export async function browserInfo(port) {
+  try {
+    const v = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    return {
+      browser: v.Browser,
+      headless: /Headless/i.test(v.Browser || '') || /Headless/i.test(v['User-Agent'] || ''),
+    };
+  } catch {
+    return { browser: null, headless: null };
+  }
+}
+
 async function pageTarget(port) {
   let targets;
   try {

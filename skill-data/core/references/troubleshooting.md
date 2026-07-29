@@ -39,6 +39,32 @@ fixes it without raising the window.
 `keyDown` must not carry `text`. Chrome inserts on the `char` event, so
 carrying text on both doubles the character: `aauuttoo eeccoollee`.
 
+## Clicks succeed but the page says you are not signed in
+
+The session is running on the wrong browser. `--profile` and `--headed` apply at
+launch only, so a session named `work` can be headless on a throwaway temp
+directory while the logins sit in the real profile. Every command succeeds
+against the wrong browser.
+
+`agent-hands doctor` prints the profile path and the real browser string and
+warns when it is headless. Close and relaunch; flags cannot fix a running
+daemon.
+
+## --text or a CSS selector finds nothing, but the element is visible
+
+It is inside a cross-origin iframe. Selectors and `--text` run in page JS, which
+cannot cross the boundary. Use `--ref` with a ref from
+`agent-browser snapshot -i`; refs carry frame context and reach inside. `--ref`
+also scrolls the element into view, so below-the-fold elements need no extra
+step. Refs go stale on every page change.
+
+## Google refuses to sign in
+
+"Ce navigateur ou cette application ne sont peut-être pas sécurisés." Google
+rejects any browser with the DevTools protocol attached. This is a browser
+check, so human-rate input changes nothing. Sign in by hand in a Chrome launched
+without a debugging port, then reattach; existing sessions are accepted.
+
 ## "session is not running"
 
 No `DevToolsActivePort` in the profile directory. Launch the session:

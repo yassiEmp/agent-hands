@@ -3,12 +3,12 @@
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error.
 
-import { CDP, devtoolsPort, profileDir } from '../cli/cdp.mjs';
-import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, readPos, KEYS } from '../cli/gestures.mjs';
+import { CDP, devtoolsPort, profileDir, browserInfo } from '../cli/cdp.mjs';
+import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 const USAGE = `agent-hands ${VERSION} — human-rate input for an agent-browser session
 
@@ -19,6 +19,7 @@ COMMANDS
   click <selector>            move along a curve, then click
   click --text "Label"        target by visible text (ranked, best match wins)
   click --xy <x> <y>          target raw viewport coordinates
+  click --ref @e12            target an agent-browser snapshot ref (works in iframes)
   hover <selector>            move onto the element, no click
   move --xy <x> <y>           move only
   fill <selector> "text"      click the field, then type into it
@@ -52,6 +53,13 @@ NOTES
   controls can still resolve the wrong one. Get selectors from
   \`agent-browser --session <s> snapshot -i\`.
   Submit forms with \`press Enter\` rather than hunting for a submit button.
+  Inside an iframe, --text and CSS selectors fail: page JS cannot cross the
+  boundary. Use --ref with a ref from \`agent-browser snapshot -i\`, which
+  carries frame context. --ref scrolls the element into view first.
+  Refs go stale on every page change. Re-snapshot before reusing one.
+  Google sign-in refuses any CDP-driven browser. That is a browser check, not
+  a behaviour check, so this tool cannot help. Sign in by hand in a Chrome
+  launched without a debugging port; the session then works here.
 
 EXAMPLES
   agent-hands fill "#searchbox_input" "auto ecole vincennes"
@@ -66,6 +74,7 @@ function parseArgs(argv) {
     if (a === '--session') out.session = argv[++i];
     else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
     else if (a === '--text') out.flags.text = argv[++i];
+    else if (a === '--ref') out.flags.ref = argv[++i];
     else if (a === '--xy') { out.flags.x = Number(argv[++i]); out.flags.y = Number(argv[++i]); }
     else if (a === '--json') out.json = true;
     else if (a === '--quiet') out.quiet = true;
@@ -84,14 +93,26 @@ async function run(args, cmd, rest) {
   if (cmd === 'doctor') {
     const port = devtoolsPort(session);
     const cdp = await CDP.connect(session);
+    const info = await browserInfo(port);
     const out = {
       session, profile: profileDir(session), port,
+      browser: info.browser, headless: info.headless,
       url: cdp.url, cursor: readPos(session),
       title: await cdp.evaluate('document.title'),
       viewport: await cdp.evaluate('innerWidth + "x" + innerHeight'),
     };
     await cdp.drain(); cdp.close();
-    return { data: out, human: `✓ ${session} ready — ${out.title || '(untitled)'} @ ${out.url}\n  port ${out.port}  viewport ${out.viewport}  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}` };
+    const warn = out.headless
+      ? '\n  ⚠ HEADLESS — logins will not survive here and Google sign-in is refused.'
+        + `\n    relaunch: agent-browser --session ${session} --profile "${out.profile}" open <url> --headed`
+      : '';
+    return {
+      data: out,
+      human: `✓ ${session} ready — ${out.title || '(untitled)'} @ ${out.url}\n`
+        + `  profile ${out.profile}\n`
+        + `  browser ${out.browser}  port ${out.port}  viewport ${out.viewport}`
+        + `  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}${warn}`,
+    };
   }
 
   const cdp = await CDP.connect(session);
@@ -99,6 +120,7 @@ async function run(args, cmd, rest) {
     const hasXY = Number.isFinite(args.flags.x);
     const target = hasXY
       ? { x: args.flags.x, y: args.flags.y, w: 12, h: 12, tag: 'XY' }
+      : args.flags.ref ? resolveRef(session, args.flags.ref)
       : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text }) : null);
     const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
 
