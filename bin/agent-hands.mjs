@@ -3,12 +3,17 @@
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error.
 
+import { readFileSync } from 'node:fs';
 import { CDP, devtoolsPort, profileDir, browserInfo } from '../cli/cdp.mjs';
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 
-const VERSION = '0.3.0';
+// Read from the manifest. A hardcoded constant drifted from package.json twice
+// and npm rejected the publish as a duplicate both times.
+const VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
 
 const USAGE = `agent-hands ${VERSION} — human-rate input for an agent-browser session
 
