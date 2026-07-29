@@ -1,0 +1,30 @@
+{
+  "name": "agent-hands",
+  "version": "0.1.0",
+  "description": "Human-rate mouse and keyboard for agent-browser sessions. Drives Chrome over raw CDP at 60-100Hz with Fitts-law motion, Bezier paths and lognormal keystroke timing — without touching the physical cursor.",
+  "type": "module",
+  "bin": {
+    "agent-hands": "bin/agent-hands.mjs",
+    "hands": "bin/agent-hands.mjs"
+  },
+  "files": [
+    "bin",
+    "cli",
+    "skills",
+    "skill-data",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "agent-browser",
+    "cdp",
+    "chrome",
+    "automation",
+    "ai-agent",
+    "human-input"
+  ],
+  "license": "MIT"
+}

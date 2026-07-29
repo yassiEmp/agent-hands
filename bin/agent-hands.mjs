@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+// agent-hands — human-rate mouse and keyboard for an agent-browser session.
+//
+// Exit codes: 0 ok, 1 runtime failure, 2 usage error.
+
+import { CDP, devtoolsPort, profileDir } from '../cli/cdp.mjs';
+import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, readPos, KEYS } from '../cli/gestures.mjs';
+import { listSkills, getSkill } from '../cli/skills.mjs';
+import { sleep, lognormal } from '../cli/motion.mjs';
+
+const VERSION = '0.1.0';
+
+const USAGE = `agent-hands ${VERSION} — human-rate input for an agent-browser session
+
+USAGE
+  agent-hands <command> [args] [--session <name>] [--speed <n>] [--json]
+
+COMMANDS
+  click <selector>            move along a curve, then click
+  click --text "Label"        target by visible text (ranked, best match wins)
+  click --xy <x> <y>          target raw viewport coordinates
+  hover <selector>            move onto the element, no click
+  move --xy <x> <y>           move only
+  fill <selector> "text"      click the field, then type into it
+  type "text"                 type into whatever has focus
+  press <Key>                 ${Object.keys(KEYS).join(' ')}
+  scroll <pixels>             negative scrolls up
+  where                       print last cursor position
+  doctor                      check the session is reachable
+  skills list                 list bundled docs
+  skills get core [--full]    print the agent guide
+
+OPTIONS
+  --session <name>   agent-browser session, paired to its profile (default: work)
+  --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
+  --json             machine-readable output — for agents
+  --quiet            exit code only
+
+WHEN TO USE THIS  (escalate, do not start here)
+  1. Default — throwaway browser, no profile, no logins:
+       agent-browser --session scratch open <url>
+     Public pages, research, scraping. Most work belongs here.
+  2. Logged-in profile — only when the task needs the user's account:
+       agent-browser --session work ... open <url> --headed
+  3. agent-hands — only when 2 applies AND the site can ban the account,
+     or agent-browser's instant input is being rejected.
+  Using this on a throwaway session buys nothing. There is no account to lose.
+
+NOTES
+  Never moves the physical cursor and never raises the window.
+  Prefer a CSS selector; --text is ranked but a page with several matching
+  controls can still resolve the wrong one. Get selectors from
+  \`agent-browser --session <s> snapshot -i\`.
+  Submit forms with \`press Enter\` rather than hunting for a submit button.
+
+EXAMPLES
+  agent-hands fill "#searchbox_input" "auto ecole vincennes"
+  agent-hands press Enter
+  agent-hands click --text "Se connecter" --session work-2
+  agent-hands scroll 600 --json`;
+
+function parseArgs(argv) {
+  const out = { session: 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--session') out.session = argv[++i];
+    else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
+    else if (a === '--text') out.flags.text = argv[++i];
+    else if (a === '--xy') { out.flags.x = Number(argv[++i]); out.flags.y = Number(argv[++i]); }
+    else if (a === '--json') out.json = true;
+    else if (a === '--quiet') out.quiet = true;
+    else if (a === '--full') out.flags.full = true;
+    else out._.push(a);
+  }
+  return out;
+}
+
+const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor']);
+
+async function run(args, cmd, rest) {
+  const { session, speed } = args;
+
+  if (cmd === 'doctor') {
+    const port = devtoolsPort(session);
+    const cdp = await CDP.connect(session);
+    const out = {
+      session, profile: profileDir(session), port,
+      url: cdp.url, cursor: readPos(session),
+      title: await cdp.evaluate('document.title'),
+      viewport: await cdp.evaluate('innerWidth + "x" + innerHeight'),
+    };
+    await cdp.drain(); cdp.close();
+    return { data: out, human: `✓ ${session} ready — ${out.title || '(untitled)'} @ ${out.url}\n  port ${out.port}  viewport ${out.viewport}  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}` };
+  }
+
+  const cdp = await CDP.connect(session);
+  try {
+    const hasXY = Number.isFinite(args.flags.x);
+    const target = hasXY
+      ? { x: args.flags.x, y: args.flags.y, w: 12, h: 12, tag: 'XY' }
+      : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text }) : null);
+    const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
+
+    switch (cmd) {
+      case 'move': {
+        const m = await moveTo(cdp, session, target, target.w, speed);
+        return { data: { ...m, x: target.x, y: target.y }, human: `✓ move -> ${at} ${m.points} pts / ${m.ms}ms${m.overshoot ? ' +correction' : ''}` };
+      }
+      case 'hover': {
+        const m = await moveTo(cdp, session, target, target.w, speed);
+        return { data: { ...m, tag: target.tag }, human: `✓ hover ${target.tag} at ${at} ${m.points} pts / ${m.ms}ms` };
+      }
+      case 'click': {
+        const m = await clickAt(cdp, session, target, target.w, speed);
+        return { data: { ...m, tag: target.tag }, human: `✓ click ${target.tag} at ${at} ${m.points} pts / ${m.ms}ms${m.overshoot ? ' +correction' : ''}` };
+      }
+      case 'type': {
+        const t = await typeText(cdp, rest[0] ?? '', speed);
+        return { data: t, human: `✓ type ${t.chars} chars / ${t.ms}ms` };
+      }
+      case 'fill': {
+        await clickAt(cdp, session, target, target.w, speed);
+        await sleep(lognormal(180, 0.4, 500));
+        const t = await typeText(cdp, rest[1] ?? '', speed);
+        return { data: { ...t, tag: target.tag }, human: `✓ fill ${target.tag} at ${at} with ${t.chars} chars / ${t.ms}ms` };
+      }
+      case 'press': {
+        const k = await pressKey(cdp, rest[0], speed);
+        return { data: k, human: `✓ press ${k.key}` };
+      }
+      case 'scroll': {
+        const s = await scrollBy(cdp, Number(rest[0] ?? 400), speed);
+        return { data: s, human: `✓ scroll ${s.pixels}px / ${s.ms}ms -> y=${s.y}` };
+      }
+    }
+  } finally {
+    await cdp.drain();
+    cdp.close();
+  }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const [cmd, ...rest] = args._;
+
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return console.log(USAGE);
+  if (cmd === 'version' || cmd === '--version' || cmd === '-v') return console.log(VERSION);
+
+  if (cmd === 'skills') {
+    const [sub, topic] = rest;
+    if (sub === 'list') return console.log(listSkills().join('\n'));
+    if (sub === 'get') return console.log(getSkill(topic || 'core', args.flags.full));
+    console.error('usage: agent-hands skills list | agent-hands skills get core [--full]');
+    process.exitCode = 2;
+    return;
+  }
+
+  if (cmd === 'where') {
+    const p = readPos(args.session);
+    if (args.json) return console.log(JSON.stringify(p ?? null));
+    return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
+  }
+
+  if (!NEEDS_BROWSER.has(cmd)) {
+    console.error(`unknown command "${cmd}"\n\n${USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const result = await run(args, cmd, rest);
+  if (args.quiet) return;
+  console.log(args.json ? JSON.stringify({ ok: true, command: cmd, ...result.data }) : result.human);
+}
+
+main().catch(err => {
+  const usage = err.code === 'EUSAGE';
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify({ ok: false, error: err.message, code: err.code ?? 'EFAIL' }));
+  } else {
+    console.error('✗ ' + err.message);
+  }
+  process.exitCode = usage ? 2 : 1;
+});
