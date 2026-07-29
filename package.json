@@ -18,6 +18,15 @@
   "engines": {
     "node": ">=22"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yassiEmp/agent-hands.git"
+  },
+  "homepage": "https://github.com/yassiEmp/agent-hands#readme",
+  "bugs": {
+    "url": "https://github.com/yassiEmp/agent-hands/issues"
+  },
+  "author": "yassi",
   "keywords": [
     "agent-browser",
     "cdp",
