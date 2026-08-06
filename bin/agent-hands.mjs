@@ -98,6 +98,9 @@ function parseArgs(argv) {
     if (a === '--session') out.session = argv[++i];
     else if (a === '--browser') out.browser = argv[++i];
     else if (a === '--cdp') out.cdp = argv[++i];
+    else if (a === '--user-data-dir') out.userDataDir = argv[++i];
+    else if (a === '--tab') out.tab = argv[++i];
+    else if (a === '--no-activate') out.activate = false;
     else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
     else if (a === '--text') out.flags.text = argv[++i];
     else if (a === '--ref') out.flags.ref = argv[++i];
@@ -117,9 +120,12 @@ const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doct
 
 async function run(args, cmd, rest) {
   const { session, speed } = args;
-  const endpoint = { session, cdp: args.cdp, browser: args.browser };
-  const external = Boolean(args.cdp || args.browser);
-  const label = args.browser || (args.cdp ? `cdp ${args.cdp}` : session);
+  const endpoint = {
+    session, cdp: args.cdp, browser: args.browser, userDataDir: args.userDataDir,
+    tab: args.tab, activate: args.activate !== false,
+  };
+  const external = Boolean(args.cdp || args.browser || args.userDataDir);
+  const label = args.browser || args.userDataDir || (args.cdp ? `cdp ${args.cdp}` : session);
 
   if (cmd === 'doctor') {
     const { port } = resolveEndpoint(endpoint);

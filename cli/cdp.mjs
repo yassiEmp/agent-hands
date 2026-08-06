@@ -24,11 +24,50 @@ const HOME = os.homedir();
 const PROFILES = process.env.AGENT_HANDS_PROFILES
   || path.join(HOME, '.agent-browser-profiles');
 
-// User data directories of browsers this machine did not launch.
-const EXTERNAL = {
-  edge: path.join(HOME, 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data'),
-  chrome: path.join(HOME, 'AppData', 'Local', 'Google', 'Chrome', 'User Data'),
+// Default user data directories of browsers this machine did not launch.
+// Any Chromium fork works; this table only saves the user from typing a path.
+// --user-data-dir covers forks, portable installs and non-default locations.
+const CHANNELS = {
+  win32: {
+    chrome: 'Google/Chrome', 'chrome-beta': 'Google/Chrome Beta',
+    'chrome-dev': 'Google/Chrome Dev', 'chrome-canary': 'Google/Chrome SxS',
+    edge: 'Microsoft/Edge', 'edge-beta': 'Microsoft/Edge Beta',
+    'edge-dev': 'Microsoft/Edge Dev', 'edge-canary': 'Microsoft/Edge SxS',
+    chromium: 'Chromium', brave: 'BraveSoftware/Brave-Browser', vivaldi: 'Vivaldi',
+  },
+  darwin: {
+    chrome: 'Google/Chrome', 'chrome-beta': 'Google/Chrome Beta',
+    'chrome-dev': 'Google/Chrome Dev', 'chrome-canary': 'Google/Chrome Canary',
+    edge: 'Microsoft Edge', 'edge-beta': 'Microsoft Edge Beta',
+    'edge-dev': 'Microsoft Edge Dev', 'edge-canary': 'Microsoft Edge Canary',
+    chromium: 'Chromium', brave: 'BraveSoftware/Brave-Browser', vivaldi: 'Vivaldi',
+  },
+  linux: {
+    chrome: 'google-chrome', 'chrome-beta': 'google-chrome-beta',
+    'chrome-dev': 'google-chrome-unstable', edge: 'microsoft-edge',
+    'edge-beta': 'microsoft-edge-beta', 'edge-dev': 'microsoft-edge-dev',
+    chromium: 'chromium', brave: 'BraveSoftware/Brave-Browser', vivaldi: 'vivaldi',
+  },
 };
+
+function userDataRoot() {
+  if (process.platform === 'win32') return path.join(HOME, 'AppData', 'Local');
+  if (process.platform === 'darwin') return path.join(HOME, 'Library', 'Application Support');
+  return process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
+}
+
+export function browserNames() {
+  return Object.keys(CHANNELS[process.platform] || CHANNELS.linux);
+}
+
+function browserDir(name) {
+  const table = CHANNELS[process.platform] || CHANNELS.linux;
+  const rel = table[name];
+  if (!rel) return null;
+  const dir = path.join(userDataRoot(), ...rel.split('/'));
+  // Windows and macOS append "User Data"; Linux uses the directory itself.
+  return process.platform === 'linux' ? dir : path.join(dir, 'User Data');
+}
 
 // work -> main, work-2 -> main-2, matching the agent-browser profile pool.
 export function profileDir(session) {
@@ -47,7 +86,7 @@ function readPortFile(dir) {
 
 // Resolve to { port, browserPath }. browserPath may be null on a classic
 // endpoint, where HTTP discovery still works.
-export function resolveEndpoint({ session, cdp, browser } = {}) {
+export function resolveEndpoint({ session, cdp, browser, userDataDir } = {}) {
   const explicit = cdp || process.env.AGENT_HANDS_CDP;
 
   if (explicit) {
@@ -57,29 +96,36 @@ export function resolveEndpoint({ session, cdp, browser } = {}) {
     throw new Error(`--cdp expects a port or a ws://host:port/devtools/browser/<uuid> url, got "${explicit}"`);
   }
 
-  if (browser) {
-    const dir = EXTERNAL[browser];
-    if (!dir) throw new Error(`unknown browser "${browser}". Use one of: ${Object.keys(EXTERNAL).join(', ')}`);
+  const dir = userDataDir || (browser ? browserDir(browser) : null);
+  if (browser && !dir) {
+    throw new Error(
+      `unknown browser "${browser}" on ${process.platform}.\n` +
+      `  known: ${browserNames().join(', ')}\n` +
+      `  any other Chromium build works with --user-data-dir <path>`
+    );
+  }
+  if (dir) {
     const found = readPortFile(dir);
     if (!found) {
+      const scheme = /edge/.test(browser || '') ? 'edge' : 'chrome';
       throw Object.assign(new Error(
-        `${browser} is not exposing a debugging endpoint.\n` +
+        `${browser || dir} is not exposing a debugging endpoint.\n` +
         `  looked for: ${path.join(dir, 'DevToolsActivePort')}\n` +
-        `  fix: open ${browser === 'edge' ? 'edge' : 'chrome'}://inspect/#remote-debugging\n` +
-        `       and tick "Allow remote debugging for this browser instance"`
+        `  fix: open ${scheme}://inspect/#remote-debugging in that browser and tick\n` +
+        `       "Allow remote debugging for this browser instance"`
       ), { code: 'ENOSESSION' });
     }
     return found;
   }
 
-  const dir = profileDir(session);
-  const found = readPortFile(dir);
+  const pooled = profileDir(session);
+  const found = readPortFile(pooled);
   if (!found) {
     throw Object.assign(new Error(
       `session "${session}" is not running.\n` +
-      `  looked for: ${path.join(dir, 'DevToolsActivePort')}\n` +
+      `  looked for: ${path.join(pooled, 'DevToolsActivePort')}\n` +
       `  fix: launch it, then retry:\n` +
-      `    agent-browser --session ${session} --profile "${dir}" open <url> --headed`
+      `    agent-browser --session ${session} --profile "${pooled}" open <url> --headed`
     ), { code: 'ENOSESSION' });
   }
   return found;
@@ -88,7 +134,8 @@ export function resolveEndpoint({ session, cdp, browser } = {}) {
 // A bare port gives no uuid. Classic endpoints do not need one. M144 endpoints
 // do, so look through known user data directories for a file naming that port.
 function recoverPath(port) {
-  for (const dir of [PROFILES, ...Object.values(EXTERNAL)]) {
+  const external = browserNames().map(browserDir).filter(Boolean);
+  for (const dir of [PROFILES, ...external]) {
     for (const d of candidateDirs(dir)) {
       const found = readPortFile(d);
       if (found && found.port === String(port)) return found;
@@ -128,7 +175,7 @@ export class CDP {
     if (!browserPath) {
       throw new Error(`no CDP endpoint on port ${port}. The browser may have exited.`);
     }
-    return CDP.attachFlat(port, browserPath);
+    return CDP.attachFlat(port, browserPath, opts);
   }
 
   // Pre-existing path. One socket per page, no sessionId.
@@ -136,7 +183,7 @@ export class CDP {
     const page = pickPage(targets);
     const cdp = await CDP.open(page.webSocketDebuggerUrl);
     cdp.url = page.url;
-    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+    await enableFocusEmulation(cdp);
     return cdp;
   }
 
@@ -145,15 +192,15 @@ export class CDP {
   // The socket is opened by a daemon, not here. M144 prompts the user to
   // authorize every new CDP connection, so a per-invocation socket would ask
   // on every command. One daemon means one prompt per browser run.
-  static async attachFlat(port, browserPath, { shared = true } = {}) {
+  static async attachFlat(port, browserPath, opts = {}) {
+    const { shared = true, tab, activate = true } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
     const cdp = shared ? await DaemonCDP.open(wsUrl) : await CDP.open(wsUrl);
     const { targetInfos } = await cdp.send('Target.getTargets');
-    const page = pickPage(targetInfos);
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: page.targetId, flatten: true });
-    cdp.sessionId = sessionId;
+    const page = await choosePage(cdp, targetInfos, { tab, activate });
+    cdp.sessionId = page.sessionId;
     cdp.url = page.url;
-    await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
+    await enableFocusEmulation(cdp);
     return cdp;
   }
 
@@ -174,25 +221,25 @@ export class CDP {
     return cdp;
   }
 
-  // sessionId is injected here so gestures.mjs needs no change.
-  #envelope(method, params, id) {
-    return JSON.stringify({ id, method, params, ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
+  // sessionId is injected here so gestures.mjs needs no change. Browser-domain
+  // calls must not carry a page sessionId.
+  envelope(method, params, id, session = this.sessionId) {
+    const browserDomain = method.startsWith('Target.') || method.startsWith('Browser.');
+    const sid = browserDomain ? null : session;
+    return { ...(id != null ? { id } : {}), method, params, ...(sid ? { sessionId: sid } : {}) };
   }
 
-  send(method, params = {}) {
+  // session overrides this.sessionId for one call, so several tabs can be
+  // probed without mutating shared state.
+  send(method, params = {}, session) {
     const id = ++this.id;
-    // Browser-domain calls must not carry a page sessionId.
-    const browserDomain = method.startsWith('Target.') || method.startsWith('Browser.');
-    const body = browserDomain
-      ? JSON.stringify({ id, method, params })
-      : this.#envelope(method, params, id);
-    this.ws.send(body);
+    this.ws.send(JSON.stringify(this.envelope(method, params, id, session ?? this.sessionId)));
     return new Promise((ok, bad) => this.pending.set(id, { ok, bad }));
   }
 
   // Input.* and in-page scroll writes: send, do not await. See header note.
   fire(method, params = {}) {
-    this.ws.send(this.#envelope(method, params, ++this.id));
+    this.ws.send(JSON.stringify(this.envelope(method, params, ++this.id)));
   }
 
   async evaluate(expression) {
@@ -240,19 +287,40 @@ export class DaemonCDP extends CDP {
     return cdp;
   }
 
+  // Waits for the pipe rather than sleeping a fixed time: the user may take a
+  // moment to click Allow. A dead relay must say why — polling a pipe that will
+  // never appear, in silence, is the worst possible failure here.
   static spawnDaemon(wsUrl, pipe) {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const child = spawn(process.execPath, [path.join(here, 'daemon.mjs'), wsUrl], {
-      detached: true, stdio: 'ignore', windowsHide: true,
+      detached: true, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
     });
+    let stderr = '';
+    child.stderr.on('data', d => { stderr += d; });
     child.unref();
-    // Wait for the pipe rather than a fixed sleep: the user may take a
-    // moment to click Allow on the authorization dialog.
+
     return new Promise((ok, bad) => {
+      let dead = false;
+      child.on('exit', code => { if (code !== 0) dead = true; });
+      // The stderr pipe holds the parent's event loop open. unref() covers the
+      // child handle, not this stream, so drop it once we have an answer.
+      const settle = fn => v => { child.stderr.destroy(); fn(v); };
+      ok = settle(ok); bad = settle(bad);
       const deadline = Date.now() + 60_000;
       (async function poll() {
         if (await probe(pipe)) return ok();
-        if (Date.now() > deadline) return bad(new Error('daemon did not start within 60s (was the browser prompt approved?)'));
+        if (dead) {
+          const why = stderr.trim().split('\n').pop() || `exited without a message`;
+          return bad(new Error(`relay failed to start: ${why}`));
+        }
+        if (Date.now() > deadline) {
+          return bad(new Error(
+            'relay did not start within 60s.\n' +
+            '  The browser asks you to approve each new debugging connection.\n' +
+            '  If no prompt appeared, the endpoint may be stale — reopen\n' +
+            '  chrome://inspect#remote-debugging and read the current port.'
+          ));
+        }
         setTimeout(poll, 250);
       })();
     });
@@ -260,16 +328,15 @@ export class DaemonCDP extends CDP {
 
   #write(obj) { this.sock.write(JSON.stringify(obj) + '\n'); }
 
-  send(method, params = {}) {
+  send(method, params = {}, session) {
     const id = ++this.id;
-    const browserDomain = method.startsWith('Target.') || method.startsWith('Browser.');
-    this.#write({ id, method, params, ...(!browserDomain && this.sessionId ? { sessionId: this.sessionId } : {}) });
+    this.#write(this.envelope(method, params, id, session ?? this.sessionId));
     return new Promise((ok, bad) => this.pending.set(id, { ok, bad }));
   }
 
   // No id: the daemon relays without tracking a reply. See CDP.fire.
   fire(method, params = {}) {
-    this.#write({ method, params, ...(this.sessionId ? { sessionId: this.sessionId } : {}) });
+    this.#write(this.envelope(method, params, null));
   }
 
   // Closing a client must not close the shared browser socket. Tear the pipe
@@ -284,10 +351,25 @@ export class DaemonCDP extends CDP {
   }
 }
 
+// Without OS focus Chrome refuses DOM focus to clicked fields, so keystrokes
+// go nowhere. Emulate focus rather than raising the window, which would steal
+// focus from whatever the user is doing.
+//
+// A backgrounded tab can accept this command and never acknowledge it. The
+// promise then neither resolves nor rejects, so .catch() cannot rescue it and
+// the caller hangs forever. The call is best-effort, so bound it and continue.
+async function enableFocusEmulation(cdp) {
+  await Promise.race([
+    cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}),
+    new Promise(r => setTimeout(r, 2000)),
+  ]);
+}
+
 // null means the endpoint serves no /json/list, not that there are no tabs.
+// A port that accepts TCP but never answers would hang an unbounded fetch.
 async function listTargets(port) {
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/json/list`);
+    const r = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) return null;
     return await r.json();
   } catch {
@@ -300,6 +382,77 @@ function pickPage(targets) {
   const page = pages.find(t => !/^(chrome|edge|devtools):/.test(t.url)) || pages[0];
   if (!page) throw new Error('no page target found. Open a tab first.');
   return page;
+}
+
+const INTERNAL = /^(chrome|edge|devtools|about|brave|vivaldi):/;
+
+// Chrome's Memory Saver freezes tabs the user has not touched. A frozen tab
+// accepts page-session commands and never answers them, so anything awaiting a
+// reply hangs forever. A tab that is merely hidden answers normally, so the
+// probe has to distinguish the two rather than assume background means broken.
+async function tabState(cdp, sessionId) {
+  try {
+    const { result } = await Promise.race([
+      cdp.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }, sessionId),
+      new Promise((_, bad) => setTimeout(() => bad(new Error('frozen')), 2500)),
+    ]);
+    return result.value;            // 'visible' | 'hidden'
+  } catch {
+    return 'frozen';
+  }
+}
+
+// Only Target.activateTarget thaws a frozen tab. Page.setWebLifecycleState
+// returns without thawing it and Emulation.setFocusEmulationEnabled hangs.
+// Activating steals the user's foreground, so put it back straight after: a
+// woken tab keeps answering once it is hidden again.
+async function choosePage(cdp, targets, { tab, activate }) {
+  const pages = targets.filter(t => t.type === 'page');
+  if (!pages.length) throw new Error('no page target found. Open a tab first.');
+
+  const wanted = tab
+    ? pages.filter(p => `${p.title} ${p.url}`.toLowerCase().includes(tab.toLowerCase()))
+    : pages.filter(p => !INTERNAL.test(p.url));
+  if (tab && !wanted.length) {
+    throw new Error(
+      `no tab matches "${tab}". Open tabs:\n` +
+      pages.map(p => `  ${(p.title || '(untitled)').slice(0, 48)}  ${p.url.slice(0, 60)}`).join('\n')
+    );
+  }
+  const candidates = wanted.length ? wanted : pages;
+
+  // Probed together: frozen tabs all time out concurrently instead of adding
+  // 2.5s each. Knowing which tab is visible is also what makes focus
+  // restoration possible later.
+  const probed = await Promise.all(pages.map(async p => {
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: p.targetId, flatten: true });
+    return { ...p, sessionId, state: await tabState(cdp, sessionId) };
+  }));
+  const byId = new Map(probed.map(p => [p.targetId, p]));
+  const wantedProbed = candidates.map(c => byId.get(c.targetId));
+  const visibleNow = probed.find(p => p.state === 'visible');
+
+  const live = wantedProbed.find(p => p.state === 'visible')
+    || wantedProbed.find(p => p.state === 'hidden');
+  if (live) return live;
+
+  const target = wantedProbed[0];
+  const name = (target.title || target.url).slice(0, 48);
+  if (!activate) {
+    throw new Error(
+      `"${name}" is frozen by the browser's memory saver.\n` +
+      `  Waking it means bringing it to the front for a moment.\n` +
+      `  Drop --no-activate to allow that, or switch to the tab yourself.`
+    );
+  }
+
+  await cdp.send('Target.activateTarget', { targetId: target.targetId });
+  const woken = await tabState(cdp, target.sessionId);
+  if (visibleNow && visibleNow.targetId !== target.targetId) {
+    await cdp.send('Target.activateTarget', { targetId: visibleNow.targetId });
+  }
+  if (woken === 'frozen') throw new Error(`"${name}" stayed frozen after being activated.`);
+  return target;
 }
 
 // Ground truth about the running browser. Browser.getVersion works on both
