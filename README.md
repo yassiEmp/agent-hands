@@ -67,8 +67,9 @@ target and the only one that reaches inside a cross-origin iframe.
 `fill` replaces the field's contents. Set `AGENT_HANDS_SESSION` to skip
 `--session` on every call.
 
-Flags: `--session <name>` (default `work`), `--browser edge|chrome`,
-`--cdp <port|url>`, `--speed 1.6` brisk / `0.7` slow, `--json`, `--quiet`.
+Flags: `--session <name>` (default `work`), `--browser <name>`,
+`--user-data-dir <path>`, `--cdp <port|url>`, `--tab <match>`, `--no-activate`,
+`--speed 1.6` brisk / `0.7` slow, `--json`, `--quiet`.
 
 Exit codes: `0` dispatched, `1` runtime failure, `2` usage error.
 
@@ -80,10 +81,18 @@ tick **Allow remote debugging for this browser instance**, then:
 
 ```bash
 agent-hands doctor --browser edge
-agent-hands fill "#search" "hello" --browser edge
+agent-hands fill "#search" "hello" --browser edge --tab gmail
 ```
 
 No restart, no lost tabs, and your logins are already there.
+
+Browsers: `chrome`, `chrome-beta`, `chrome-dev`, `chrome-canary`, `edge`,
+`edge-beta`, `edge-dev`, `edge-canary`, `chromium`, `brave`, `vivaldi`, on
+Windows, macOS and Linux. Any other Chromium build works with
+`--user-data-dir <path>`.
+
+`--tab` matches a title or url. An unmatched value lists what is open. Without
+it the visible tab wins.
 
 That endpoint serves no `/json/*` routes: every path returns 404 and a root
 websocket upgrade returns 403. Targets are read over the browser websocket with
@@ -95,6 +104,13 @@ cannot be persisted. So a small background relay holds the one socket and
 short-lived CLI processes talk to it over a local pipe. You approve once per
 browser run rather than once per command. The relay exits when the browser
 closes.
+
+A hidden tab is driven where it is and your foreground never changes. A tab
+frozen by the browser's memory saver cannot answer any command, so it is woken
+by bringing it forward for a moment and your previous tab is restored straight
+after. `Page.setWebLifecycleState` does not thaw a frozen tab and
+`Emulation.setFocusEmulationEnabled` hangs on one, so activation is the only
+route. `--no-activate` turns that flicker into an error instead.
 
 `--ref` needs refs from `agent-browser snapshot -i`, which only exist for a
 pooled session. With `--browser` or `--cdp`, target by selector or `--text`.

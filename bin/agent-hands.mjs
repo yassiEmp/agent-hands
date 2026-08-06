@@ -38,8 +38,11 @@ COMMANDS
 
 OPTIONS
   --session <name>   agent-browser session (default: $AGENT_HANDS_SESSION or work)
-  --browser <name>   a browser you launched yourself: edge | chrome
+  --browser <name>   a browser you launched yourself, see below
+  --user-data-dir <path>  any other Chromium build
   --cdp <port|url>   an explicit endpoint, or $AGENT_HANDS_CDP
+  --tab <match>      choose the tab by title or url
+  --no-activate      never bring a frozen tab to the front; error instead
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
   --json             machine-readable output — for agents
   --quiet            exit code only
@@ -51,13 +54,22 @@ YOUR OWN BROWSER
 
     agent-hands doctor --browser edge
 
+  Browsers: chrome, chrome-beta, chrome-dev, chrome-canary, edge, edge-beta,
+  edge-dev, edge-canary, chromium, brave, vivaldi. Anything else works with
+  --user-data-dir. Paths are known for Windows, macOS and Linux.
+
   That endpoint serves no /json/* routes, so targets are read over the browser
   websocket instead. The browser asks you to authorize each new CDP connection
   and the approval cannot be persisted, so one background relay holds the single
   socket: you approve once per browser run, not once per command.
 
+  A hidden tab is driven in place and keeps your foreground. A tab frozen by
+  the browser's memory saver cannot answer at all; it is woken by bringing it
+  forward for a moment, then your previous tab is restored. --no-activate turns
+  that into an error.
+
   --ref needs refs from \`agent-browser snapshot -i\`, which only exist for a
-  pooled session. With --browser or --cdp, target by selector or --text.
+  pooled session. Outside one, target by selector or --text.
 
 WHEN TO USE THIS  (escalate, do not start here)
   1. Default — throwaway browser, no profile, no logins:
