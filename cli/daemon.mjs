@@ -13,6 +13,8 @@
 import net from 'node:net';
 import crypto from 'node:crypto';
 
+import { approveWhilePending } from './approve.mjs';
+
 export function pipeName(wsUrl) {
   const h = crypto.createHash('sha1').update(wsUrl).digest('hex').slice(0, 12);
   return process.platform === 'win32'
@@ -38,12 +40,20 @@ async function main() {
 
   if (await probe(pipe)) process.exit(0);   // someone won the race
 
-  // The one and only authorization prompt happens here.
+  // The one and only authorization prompt happens here. The browser draws it in its own window
+  // chrome, so CDP cannot dismiss it and this upgrade just hangs until somebody clicks. agent-win
+  // clicks it for us while the handshake is pending; without agent-win, a human clicks instead.
   const ws = new WebSocket(wsUrl);
-  await new Promise((ok, bad) => {
-    ws.addEventListener('open', ok, { once: true });
-    ws.addEventListener('error', () => bad(new Error('browser refused the socket')), { once: true });
-  });
+  const approved = new AbortController();
+  approveWhilePending(approved.signal, msg => console.error(`daemon: ${msg}`));
+  try {
+    await new Promise((ok, bad) => {
+      ws.addEventListener('open', ok, { once: true });
+      ws.addEventListener('error', () => bad(new Error('browser refused the socket')), { once: true });
+    });
+  } finally {
+    approved.abort();
+  }
 
   // Client ids are rewritten so two concurrent CLIs cannot collide.
   let seq = 0;

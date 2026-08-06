@@ -94,16 +94,53 @@ Windows, macOS and Linux. Any other Chromium build works with
 `--tab` matches a title or url. An unmatched value lists what is open. Without
 it the visible tab wins.
 
-That endpoint serves no `/json/*` routes: every path returns 404 and a root
-websocket upgrade returns 403. Targets are read over the browser websocket with
-`Target.getTargets` instead, which works on both endpoint styles. Pooled
-sessions keep using the per-page socket exactly as before.
+That endpoint serves no `/json/*` routes, so nothing can discover targets over
+HTTP. They are read over the browser websocket with `Target.getTargets` instead,
+which works on both endpoint styles. Pooled sessions keep the per-page socket
+exactly as before.
+
+The uuid on line 2 of `DevToolsActivePort` is mandatory here, and it **changes
+every time the toggle is switched**. A stale uuid times out exactly like a
+rejected one, so re-read the file rather than caching it.
+
+### The prompt, and why it is answered for you
 
 The browser asks you to authorize every new CDP connection, and that approval
-cannot be persisted. So a small background relay holds the one socket and
-short-lived CLI processes talk to it over a local pipe. You approve once per
-browser run rather than once per command. The relay exits when the browser
-closes.
+cannot be persisted. Worse, it is drawn in the browser's own window chrome:
+CDP cannot see it and cannot dismiss it, so the websocket upgrade **hangs** with
+no error until somebody clicks. Clients with a short handshake timeout give up
+first — `playwright-cli` abandons it after 30s.
+
+Two mitigations. A small background relay holds the one socket, so you approve
+once per browser run rather than once per command. And if
+[agent-win](https://github.com/yassiEmp/agent-win) is installed, the prompt is
+clicked for you while the handshake is pending, so a connect needs no human at
+all:
+
+```bash
+AGENT_WIN_HOME=/path/to/agent-win agent-hands doctor --browser edge
+```
+
+Without agent-win nothing breaks; the connect simply waits for you to click.
+`AGENT_HANDS_NO_APPROVE=1` disables it outright.
+
+That approver works in any UI language. It finds the dialog by Chromium's
+`MdTextButton` class, which is never translated, then picks the affirmative from
+a table of the word "Allow" in ~30 languages. It deliberately refuses to guess:
+the real dialog has three buttons — *Disable in settings*, *Allow*, *Cancel* —
+and Allow is neither first nor last, so choosing by position would disable your
+setting or refuse the connection. In an unlisted language it prints the buttons
+it saw and waits for you.
+
+One caveat worth knowing: the prompt names no requester, so the approver clears
+**any** pending debugging prompt on the desktop. Do not run it while a
+connection you did not start is waiting.
+
+**Diagnosing a hang.** A clean `404` on `/json/version` means the server is up
+and simply serves no `/json/*`. `EOF while parsing` means it is not answering at
+all — a pending prompt or a rotated uuid. Sending an `Origin` header turns the
+hang into a `403` naming `--remote-allow-origins`, which is a red herring:
+omitting `Origin` is what works.
 
 A hidden tab is driven where it is and your foreground never changes. A tab
 frozen by the browser's memory saver cannot answer any command, so it is woken

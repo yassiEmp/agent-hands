@@ -18,6 +18,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { approveWhilePending } from './approve.mjs';
 import { pipeName, probe } from './daemon.mjs';
 
 const HOME = os.homedir();
@@ -195,7 +196,7 @@ export class CDP {
   static async attachFlat(port, browserPath, opts = {}) {
     const { shared = true, tab, activate = true } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
-    const cdp = shared ? await DaemonCDP.open(wsUrl) : await CDP.open(wsUrl);
+    const cdp = shared ? await DaemonCDP.open(wsUrl) : await CDP.open(wsUrl, { approve: true });
     const { targetInfos } = await cdp.send('Target.getTargets');
     const page = await choosePage(cdp, targetInfos, { tab, activate });
     cdp.sessionId = page.sessionId;
@@ -204,12 +205,21 @@ export class CDP {
     return cdp;
   }
 
-  static async open(wsUrl) {
+  // `approve` is for external browsers only. Their handshake hangs behind a native modal that CDP
+  // cannot see, so agent-win is asked to click it while this promise is pending. Pooled sessions
+  // never prompt, so they never pay for the probe.
+  static async open(wsUrl, { approve = false } = {}) {
     const ws = new WebSocket(wsUrl);
-    await new Promise((ok, bad) => {
-      ws.addEventListener('open', ok, { once: true });
-      ws.addEventListener('error', () => bad(new Error('CDP socket refused')), { once: true });
-    });
+    const approver = approve ? new AbortController() : null;
+    if (approver) approveWhilePending(approver.signal);
+    try {
+      await new Promise((ok, bad) => {
+        ws.addEventListener('open', ok, { once: true });
+        ws.addEventListener('error', () => bad(new Error('CDP socket refused')), { once: true });
+      });
+    } finally {
+      approver?.abort();
+    }
     const cdp = new CDP(ws);
     ws.addEventListener('message', ev => {
       const msg = JSON.parse(ev.data);
