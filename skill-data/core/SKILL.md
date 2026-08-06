@@ -47,9 +47,18 @@ it is faster.
 | Open a URL, read text, snapshot, cookies, tabs | `agent-browser` |
 | Click, type, fill, press a key, scroll on a credentialed site | `agent-hands` |
 | Click on a throwaway session | `agent-browser` |
+| Click a NATIVE OS dialog the page cannot reach | `agent-win` |
 
 Both drive the same browser at the same time. No handoff, no conflict.
 `agent-hands` has no `open`; navigation always stays with `agent-browser`.
+
+`agent-win` is the OS lane, not a browser tool. Its only browser job is clicking
+native dialogs that live in the window chrome, where CDP is blind — the
+"Allow remote debugging?" prompt above all. It does that automatically when you
+use `--browser`, so you should never need to call it yourself. **Do not drive
+pages with it.** UIA can reach page content, which is exactly the trap: it is
+slower, it breaks on every re-render, and its searches also match the browser's
+own chrome and your terminal's on-screen text.
 
 ## The loop
 

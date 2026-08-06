@@ -1,0 +1,120 @@
+// Answer the browser's "Allow remote debugging?" modal so connecting needs no human.
+//
+// Chrome and Edge 144+ let a user enable remote debugging from chrome://inspect. That endpoint
+// then gates EVERY new CDP connection behind a native modal drawn in the browser's own window
+// chrome. CDP cannot see it and cannot dismiss it, so the websocket upgrade just hangs — no error,
+// no 403 — until somebody clicks. Clients with a short handshake timeout give up first.
+//
+// The modal is a normal UI Automation control, so agent-win can invoke it. Authorising that
+// connection is agent-win's ONLY job here. Page, tab and DOM work belongs to this tool.
+//
+// Everything is best-effort: without agent-win the connect still works, it just waits for a human.
+//
+// LOCALE. The dialog is fully translated, so matching "Allow" only works on an English browser.
+// Narrowing is therefore structural first: ClassName is set by Chromium and never translated, so
+// `--class MdTextButton` finds the dialog's buttons in any language (it cut ~200 buttons to 7 on
+// a French Edge). Only then is the affirmative chosen by name.
+//
+// WHY NOT PICK BY POSITION. The real dialog has THREE buttons — "Disable in settings", "Allow",
+// "Cancel" — and Allow is neither first nor last. Guessing by order would disable the user's
+// debugging or deny the connection. So an unknown language refuses to click and prints what it
+// saw, which is recoverable; a wrong click is not.
+//
+// LIMITATION. The modal names no requester, so this approves ANY pending debugging prompt. Do not
+// run it while a connection you did not start is waiting.
+
+import { spawn } from 'node:child_process';
+
+// "Allow" as Chromium ships it. Compared case-insensitively, accents intact.
+// An unlisted language is not a failure: it prints the buttons it found so this list can grow.
+const ALLOW = [
+  'allow', 'autoriser', 'permitir', 'consenti', 'consentire', 'zulassen', 'erlauben',
+  'toestaan', 'tillåt', 'tillad', 'tillat', 'salli', 'zezwól', 'zezwalaj', 'povolit',
+  'povoliť', 'engedélyezés', 'engedélyez', 'permite', 'permiteți', 'dopusti', 'dozvoli',
+  'разрешить', 'дозволити', 'позволи', 'izin ver', 'ver', 'izinkan', 'benarkan',
+  'cho phép', 'อนุญาต', '허용', '許可', '允许', '允許', 'επιτρέπεται', 'να επιτρέπεται',
+  'לאפשר', 'אפשר', 'السماح', 'اسمح', 'اجازه', 'अनुमति दें', 'अनुमति',
+];
+
+const DIALOG_BUTTON_CLASS = 'MdTextButton';   // Chromium's dialog button, same in every locale
+const BROWSERS = ['msedge.exe', 'chrome.exe', 'brave.exe', 'vivaldi.exe', 'chromium.exe'];
+const POLL_MS = 400;
+
+function agentWin(args) {
+  const python = process.env.AGENT_WIN_PYTHON || 'python';
+  return new Promise(resolve => {
+    let out = '';
+    let child;
+    try {
+      child = spawn(python, ['-m', 'agent_win', ...args], {
+        env: {
+          ...process.env,
+          PYTHONPATH: process.env.AGENT_WIN_HOME || process.env.PYTHONPATH || '',
+          PYTHONIOENCODING: 'utf-8',            // button names are not ascii
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return resolve(null);
+    }
+    child.stdout.on('data', d => { out += d; });
+    child.on('error', () => resolve(null));     // agent-win absent: let a human click
+    child.on('close', code => resolve(code === 0 ? out : null));
+  });
+}
+
+function isAllow(name) {
+  const n = (name || '').trim().toLowerCase().replace(/[.…!]+$/, '');
+  return ALLOW.some(w => n === w || n.startsWith(`${w} `) || n.endsWith(` ${w}`));
+}
+
+async function clickPending(log, seen) {
+  const out = await agentWin(['find', '', '--type', 'Button', '--class', DIALOG_BUTTON_CLASS, '--json']);
+  if (!out) return false;
+  let matches;
+  try {
+    matches = JSON.parse(out).matches || [];
+  } catch {
+    return false;
+  }
+  const inBrowser = matches.filter(m => BROWSERS.includes((m.process || '').toLowerCase()));
+  if (!inBrowser.length) return false;
+
+  const allow = inBrowser.filter(m => isAllow(m.name));
+  if (!allow.length) {
+    const names = [...new Set(inBrowser.map(m => m.name).filter(Boolean))].join(' | ');
+    if (names && !seen.has(names)) {
+      seen.add(names);
+      log?.(`a browser prompt is open but no button matched a known "Allow": ${names}. ` +
+            `Click it once by hand, or add the word to ALLOW in cli/approve.mjs.`);
+    }
+    return false;
+  }
+  // One button appears per pending attempt, so retries stack them. Clicking an old one approves a
+  // connection that already timed out while the live socket keeps waiting. Click them all.
+  for (const m of allow) {
+    log?.(`approving the browser prompt (${m.ref} "${m.name}")`);
+    await agentWin(['click', m.ref, '-q']);
+  }
+  return true;
+}
+
+// Poll for the modal until `signal` aborts — that is, until the socket opens or the caller gives
+// up. Returns nothing: the socket is the real result, this is a side effect on the desktop.
+export function approveWhilePending(signal, log) {
+  if (process.env.AGENT_HANDS_NO_APPROVE) return;
+  let stopped = false;
+  const seen = new Set();
+  signal?.addEventListener?.('abort', () => { stopped = true; }, { once: true });
+  (async () => {
+    while (!stopped) {
+      try {
+        await clickPending(log, seen);
+      } catch {
+        // a failed probe must never break the connect it is trying to help
+      }
+      if (stopped) return;
+      await new Promise(r => setTimeout(r, POLL_MS));
+    }
+  })();
+}

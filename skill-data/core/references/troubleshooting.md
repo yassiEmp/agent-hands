@@ -85,3 +85,51 @@ used `--text`, the match is ranked but ambiguous pages defeat it.
 
 Two browsers on one profile directory. Chrome locks it. Use a different session
 name **and** a different profile, or wait for the first to close.
+
+## Connecting to your own browser hangs with no error
+
+The `chrome://inspect` endpoint gates every new CDP connection behind a native
+prompt drawn in the browser's window chrome. CDP cannot see or dismiss it, so
+the websocket upgrade hangs — no error, no 403 — until it is clicked.
+
+Install [agent-win](https://github.com/yassiEmp/agent-win) and set
+`AGENT_WIN_HOME`; the prompt is then clicked while the handshake is pending.
+Otherwise click it yourself, and note the connection must already be in flight,
+because the button only exists while an upgrade is pending.
+
+Before blaming any client, connect a bare websocket to
+`ws://127.0.0.1:<port><uuidPath>`. Every client failure seen so far was the
+endpoint. Two causes look identical from outside:
+
+- a prompt waiting for a click
+- a rotated uuid — toggling remote debugging keeps the port and issues a NEW
+  uuid, so re-read line 2 of `DevToolsActivePort`
+
+Read the error shape. A clean `404` on `/json/version` means the server is up
+and serves no `/json/*`. `EOF while parsing` means it is not answering at all.
+Adding an `Origin` header turns the hang into a `403` naming
+`--remote-allow-origins`; that is a red herring, since omitting `Origin` is what
+works.
+
+## The prompt is on screen but nothing matches "Allow"
+
+Its text is translated. The approver narrows by Chromium's `MdTextButton` class,
+which is not, then matches a table of ~30 languages. In an unlisted language it
+prints the button names it found and waits rather than guessing — the dialog has
+three buttons and the affirmative is neither first nor last, so a positional
+guess would disable your setting or refuse the connection. Add the word to
+`ALLOW` in `cli/approve.mjs`.
+
+## A retried connect stacks up prompts
+
+One prompt appears per pending attempt. Clicking an old one approves a
+connection that already timed out, while your live socket keeps waiting. Clear
+them all, then check the socket rather than the screen.
+
+## Typed text arrives mangled
+
+Keystroke entry drops and repeats characters when focus moves mid-type; measured
+against Notepad, "typed this" arrived as "yyped hhis" with no error raised
+anywhere. Prefer `fill` on a control that accepts a value directly, and treat
+any write you did not read back as unverified. A command reporting success
+proves the mechanism fired, never that the effect happened.
