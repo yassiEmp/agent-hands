@@ -4,7 +4,7 @@
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error.
 
 import { readFileSync } from 'node:fs';
-import { CDP, devtoolsPort, profileDir, browserInfo } from '../cli/cdp.mjs';
+import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint } from '../cli/cdp.mjs';
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
@@ -38,9 +38,26 @@ COMMANDS
 
 OPTIONS
   --session <name>   agent-browser session (default: $AGENT_HANDS_SESSION or work)
+  --browser <name>   a browser you launched yourself: edge | chrome
+  --cdp <port|url>   an explicit endpoint, or $AGENT_HANDS_CDP
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
   --json             machine-readable output — for agents
   --quiet            exit code only
+
+YOUR OWN BROWSER
+  Chrome and Edge 144+ expose remote debugging without --remote-debugging-port.
+  Open chrome://inspect/#remote-debugging or edge://inspect/#remote-debugging and
+  tick "Allow remote debugging for this browser instance", then:
+
+    agent-hands doctor --browser edge
+
+  That endpoint serves no /json/* routes, so targets are read over the browser
+  websocket instead. The browser asks you to authorize each new CDP connection
+  and the approval cannot be persisted, so one background relay holds the single
+  socket: you approve once per browser run, not once per command.
+
+  --ref needs refs from \`agent-browser snapshot -i\`, which only exist for a
+  pooled session. With --browser or --cdp, target by selector or --text.
 
 WHEN TO USE THIS  (escalate, do not start here)
   1. Default — throwaway browser, no profile, no logins:
@@ -79,6 +96,8 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--session') out.session = argv[++i];
+    else if (a === '--browser') out.browser = argv[++i];
+    else if (a === '--cdp') out.cdp = argv[++i];
     else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
     else if (a === '--text') out.flags.text = argv[++i];
     else if (a === '--ref') out.flags.ref = argv[++i];
@@ -98,13 +117,17 @@ const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doct
 
 async function run(args, cmd, rest) {
   const { session, speed } = args;
+  const endpoint = { session, cdp: args.cdp, browser: args.browser };
+  const external = Boolean(args.cdp || args.browser);
+  const label = args.browser || (args.cdp ? `cdp ${args.cdp}` : session);
 
   if (cmd === 'doctor') {
-    const port = devtoolsPort(session);
-    const cdp = await CDP.connect(session);
-    const info = await browserInfo(port);
+    const { port } = resolveEndpoint(endpoint);
+    const cdp = await CDP.connect(endpoint);
+    // /json/version does not exist on a 144+ endpoint. Ask the browser itself.
+    const info = await browserInfo(cdp.sessionId ? cdp : port);
     const out = {
-      session, profile: profileDir(session), port,
+      session: label, profile: external ? null : profileDir(session), port,
       browser: info.browser, headless: info.headless,
       url: cdp.url, cursor: readPos(session),
       title: await cdp.evaluate('document.title'),
@@ -113,18 +136,18 @@ async function run(args, cmd, rest) {
     await cdp.drain(); cdp.close();
     const warn = out.headless
       ? '\n  ⚠ HEADLESS — logins will not survive here and Google sign-in is refused.'
-        + `\n    relaunch: agent-browser --session ${session} --profile "${out.profile}" open <url> --headed`
+        + `\n    relaunch: agent-browser --session ${session} --profile "${profileDir(session)}" open <url> --headed`
       : '';
     return {
       data: out,
-      human: `✓ ${session} ready — ${out.title || '(untitled)'} @ ${out.url}\n`
-        + `  profile ${out.profile}\n`
+      human: `✓ ${label} ready — ${out.title || '(untitled)'} @ ${out.url}\n`
+        + `  ${out.profile ? `profile ${out.profile}` : 'external browser — you launched it, not agent-browser'}\n`
         + `  browser ${out.browser}  port ${out.port}  viewport ${out.viewport}`
         + `  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}${warn}`,
     };
   }
 
-  const cdp = await CDP.connect(session);
+  const cdp = await CDP.connect(endpoint);
   try {
     const hasXY = Number.isFinite(args.flags.x);
     const target = hasXY

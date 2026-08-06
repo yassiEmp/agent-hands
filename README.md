@@ -67,10 +67,39 @@ target and the only one that reaches inside a cross-origin iframe.
 `fill` replaces the field's contents. Set `AGENT_HANDS_SESSION` to skip
 `--session` on every call.
 
-Flags: `--session <name>` (default `work`), `--speed 1.6` brisk / `0.7` slow,
-`--json`, `--quiet`.
+Flags: `--session <name>` (default `work`), `--browser edge|chrome`,
+`--cdp <port|url>`, `--speed 1.6` brisk / `0.7` slow, `--json`, `--quiet`.
 
 Exit codes: `0` dispatched, `1` runtime failure, `2` usage error.
+
+## Your own browser
+
+Chrome and Edge 144+ expose remote debugging without `--remote-debugging-port`.
+Open `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`,
+tick **Allow remote debugging for this browser instance**, then:
+
+```bash
+agent-hands doctor --browser edge
+agent-hands fill "#search" "hello" --browser edge
+```
+
+No restart, no lost tabs, and your logins are already there.
+
+That endpoint serves no `/json/*` routes: every path returns 404 and a root
+websocket upgrade returns 403. Targets are read over the browser websocket with
+`Target.getTargets` instead, which works on both endpoint styles. Pooled
+sessions keep using the per-page socket exactly as before.
+
+The browser asks you to authorize every new CDP connection, and that approval
+cannot be persisted. So a small background relay holds the one socket and
+short-lived CLI processes talk to it over a local pipe. You approve once per
+browser run rather than once per command. The relay exits when the browser
+closes.
+
+`--ref` needs refs from `agent-browser snapshot -i`, which only exist for a
+pooled session. With `--browser` or `--cdp`, target by selector or `--text`.
+
+Set `AGENT_HANDS_CDP` to skip `--cdp` on every call.
 
 ## For agents
 
