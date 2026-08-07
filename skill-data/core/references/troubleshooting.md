@@ -92,10 +92,11 @@ The `chrome://inspect` endpoint gates every new CDP connection behind a native
 prompt drawn in the browser's window chrome. CDP cannot see or dismiss it, so
 the websocket upgrade hangs — no error, no 403 — until it is clicked.
 
-Install [agent-win](https://github.com/yassiEmp/agent-win) and set
-`AGENT_WIN_HOME`; the prompt is then clicked while the handshake is pending.
-Otherwise click it yourself, and note the connection must already be in flight,
-because the button only exists while an upgrade is pending.
+agent-win clicks it for you, but it is a SEPARATE Windows-only install and no
+dependency of this package. Put `agent-win` on PATH, or set `AGENT_WIN_HOME` to a
+checkout. When it is missing you get one line saying so — click the prompt
+yourself, and note the connection must already be in flight, because the button
+only exists while an upgrade is pending.
 
 Before blaming any client, connect a bare websocket to
 `ws://127.0.0.1:<port><uuidPath>`. Every client failure seen so far was the

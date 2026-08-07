@@ -40,13 +40,31 @@ const DIALOG_BUTTON_CLASS = 'MdTextButton';   // Chromium's dialog button, same 
 const BROWSERS = ['msedge.exe', 'chrome.exe', 'brave.exe', 'vivaldi.exe', 'chromium.exe'];
 const POLL_MS = 400;
 
-function agentWin(args) {
+// How to invoke agent-win, in order of what a real install looks like:
+//   1. $AGENT_WIN  — an explicit command
+//   2. `agent-win` on PATH (pip install, or the repo's shim)
+//   3. `python -m agent_win` (pip install), optionally with $AGENT_WIN_HOME for a git checkout
+// Resolved once, then cached, so a missing tool costs one probe rather than one per poll.
+let RESOLVED;
+
+function candidates() {
   const python = process.env.AGENT_WIN_PYTHON || 'python';
+  const list = [];
+  if (process.env.AGENT_WIN) list.push({ cmd: process.env.AGENT_WIN, pre: [] });
+  // No shell. Node warns that shell:true concatenates rather than escapes arguments, and these
+  // arguments contain user-visible button text. `pip install agent-win` puts a real executable on
+  // PATH, and `python -m agent_win` covers both a pip install and a checkout via AGENT_WIN_HOME.
+  list.push({ cmd: 'agent-win', pre: [] });
+  list.push({ cmd: python, pre: ['-m', 'agent_win'] });
+  return list;
+}
+
+function spawnOnce({ cmd, pre }, args) {
   return new Promise(resolve => {
     let out = '';
     let child;
     try {
-      child = spawn(python, ['-m', 'agent_win', ...args], {
+      child = spawn(cmd, [...pre, ...args], {
         env: {
           ...process.env,
           PYTHONPATH: process.env.AGENT_WIN_HOME || process.env.PYTHONPATH || '',
@@ -58,9 +76,27 @@ function agentWin(args) {
       return resolve(null);
     }
     child.stdout.on('data', d => { out += d; });
-    child.on('error', () => resolve(null));     // agent-win absent: let a human click
+    child.on('error', () => resolve(null));
     child.on('close', code => resolve(code === 0 ? out : null));
   });
+}
+
+async function agentWin(args) {
+  if (RESOLVED === null) return null;                 // known absent
+  if (RESOLVED) return spawnOnce(RESOLVED, args);
+  for (const c of candidates()) {
+    const probe = await spawnOnce(c, ['help']);
+    if (probe !== null) {
+      RESOLVED = c;
+      return spawnOnce(c, args);
+    }
+  }
+  RESOLVED = null;
+  return null;
+}
+
+export function agentWinMissing() {
+  return RESOLVED === null;
 }
 
 function isAllow(name) {
@@ -70,7 +106,16 @@ function isAllow(name) {
 
 async function clickPending(log, seen) {
   const out = await agentWin(['find', '', '--type', 'Button', '--class', DIALOG_BUTTON_CLASS, '--json']);
-  if (!out) return false;
+  if (!out) {
+    // Silence here is the worst outcome: the connect hangs and nothing says why.
+    if (agentWinMissing() && !seen.has('#missing')) {
+      seen.add('#missing');
+      log?.('agent-win not found, so the browser prompt cannot be clicked for you. ' +
+            'Click "Allow" in the browser now. To automate it: pip install agent-win, ' +
+            'or set AGENT_WIN_HOME to a checkout.');
+    }
+    return false;
+  }
   let matches;
   try {
     matches = JSON.parse(out).matches || [];
