@@ -128,6 +128,8 @@ agent-hands doctor --browser edge                      # if agent-win is on PATH
 AGENT_WIN_HOME=/path/to/agent-win agent-hands doctor --browser edge
 ```
 
+A pip install puts `agent-win` on PATH and needs no environment variable at all.
+
 Without it nothing breaks: the connect waits for you to click, and says so once
 rather than hanging silently. `AGENT_HANDS_NO_APPROVE=1` disables it outright.
 On macOS and Linux there is no such prompt, so none of this applies.

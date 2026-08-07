@@ -111,8 +111,9 @@ async function clickPending(log, seen) {
     if (agentWinMissing() && !seen.has('#missing')) {
       seen.add('#missing');
       log?.('agent-win not found, so the browser prompt cannot be clicked for you. ' +
-            'Click "Allow" in the browser now. To automate it: pip install agent-win, ' +
-            'or set AGENT_WIN_HOME to a checkout.');
+            'Click "Allow" in the browser now. To automate it, install agent-win ' +
+            '(https://github.com/yassiEmp/agent-win) and put it on PATH, or point ' +
+            'AGENT_WIN_HOME at a checkout.');
     }
     return false;
   }
