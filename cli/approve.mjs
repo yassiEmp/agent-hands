@@ -24,6 +24,7 @@
 // run it while a connection you did not start is waiting.
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 
 // "Allow" as Chromium ships it. Compared case-insensitively, accents intact.
 // An unlisted language is not a failure: it prints the buttons it found so this list can grow.
@@ -50,16 +51,26 @@ let RESOLVED;
 function candidates() {
   const python = process.env.AGENT_WIN_PYTHON || 'python';
   const list = [];
-  if (process.env.AGENT_WIN) list.push({ cmd: process.env.AGENT_WIN, pre: [] });
+  // AGENT_WIN is documented as an executable, but a checkout path is the
+  // obvious thing to put there, and spawning a directory fails silently: all
+  // three candidates miss, no approver runs, and the connect hangs 60s behind
+  // an unanswered modal. Treat a directory as the module home instead.
+  const win = process.env.AGENT_WIN;
+  const winDir = win && isDir(win) ? win : null;
+  if (win && !winDir) list.push({ cmd: win, pre: [] });
   // No shell. Node warns that shell:true concatenates rather than escapes arguments, and these
   // arguments contain user-visible button text. `pip install agent-win` puts a real executable on
   // PATH, and `python -m agent_win` covers both a pip install and a checkout via AGENT_WIN_HOME.
   list.push({ cmd: 'agent-win', pre: [] });
-  list.push({ cmd: python, pre: ['-m', 'agent_win'] });
+  list.push({ cmd: python, pre: ['-m', 'agent_win'], home: winDir });
   return list;
 }
 
-function spawnOnce({ cmd, pre }, args) {
+function isDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+function spawnOnce({ cmd, pre, home }, args) {
   return new Promise(resolve => {
     let out = '';
     let child;
@@ -67,7 +78,7 @@ function spawnOnce({ cmd, pre }, args) {
       child = spawn(cmd, [...pre, ...args], {
         env: {
           ...process.env,
-          PYTHONPATH: process.env.AGENT_WIN_HOME || process.env.PYTHONPATH || '',
+          PYTHONPATH: home || process.env.AGENT_WIN_HOME || process.env.PYTHONPATH || '',
           PYTHONIOENCODING: 'utf-8',            // button names are not ascii
         },
         stdio: ['ignore', 'pipe', 'ignore'],

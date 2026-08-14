@@ -183,9 +183,17 @@ export class CDP {
   static async attachPerPage(targets) {
     const page = pickPage(targets);
     const cdp = await CDP.open(page.webSocketDebuggerUrl);
-    cdp.url = page.url;
-    await enableFocusEmulation(cdp);
-    return cdp;
+    // Anything that throws from here on must close the socket first. The caller
+    // never received `cdp`, so nobody else can, and an open handle keeps the
+    // event loop alive: the CLI prints its error and then hangs forever.
+    try {
+      cdp.url = page.url;
+      await enableFocusEmulation(cdp);
+      return cdp;
+    } catch (e) {
+      cdp.close();
+      throw e;
+    }
   }
 
   // M144 path. One browser socket, targets over CDP, flat session.
@@ -197,12 +205,20 @@ export class CDP {
     const { shared = true, tab, activate = true } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
     const cdp = shared ? await DaemonCDP.open(wsUrl) : await CDP.open(wsUrl, { approve: true });
-    const { targetInfos } = await cdp.send('Target.getTargets');
-    const page = await choosePage(cdp, targetInfos, { tab, activate });
-    cdp.sessionId = page.sessionId;
-    cdp.url = page.url;
-    await enableFocusEmulation(cdp);
-    return cdp;
+    // Same reason as attachPerPage: a throw here (no tab matched, a frozen tab,
+    // a dead target) leaks the pipe and the process never exits. `--tab typo`
+    // used to print its error and hang until the caller killed it.
+    try {
+      const { targetInfos } = await cdp.send('Target.getTargets');
+      const page = await choosePage(cdp, targetInfos, { tab, activate });
+      cdp.sessionId = page.sessionId;
+      cdp.url = page.url;
+      await enableFocusEmulation(cdp);
+      return cdp;
+    } catch (e) {
+      cdp.close();
+      throw e;
+    }
   }
 
   // `approve` is for external browsers only. Their handshake hangs behind a native modal that CDP
