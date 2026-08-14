@@ -8,6 +8,7 @@ import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint } from '../
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
+import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } from '../cli/version.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -33,6 +34,7 @@ COMMANDS
   scroll <pixels>             negative scrolls up
   where                       print last cursor position
   doctor                      check the session is reachable
+  update [--yes]              report a newer version; --yes applies it
   skills list                 list bundled docs
   skills get core [--full]    print the agent guide
 
@@ -122,6 +124,8 @@ function parseArgs(argv) {
     else if (a === '--full') out.flags.full = true;
     else if (a === '--times') out.flags.times = Math.max(1, Number(argv[++i]) || 1);
     else if (a === '--append') out.flags.append = true;
+    else if (a === '--yes' || a === '-y') out.flags.yes = true;
+    else if (a === '--no-update-check') out.flags.noUpdateCheck = true;
     else out._.push(a);
   }
   return out;
@@ -227,6 +231,14 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = args._;
 
+  // Every exit path gets the notice, including `skills`, `where` and errors.
+  // A stale copy is most dangerous exactly when an agent is reading the docs
+  // or hitting an error, because that is when it decides the tool cannot help.
+  if (!args.flags.noUpdateCheck && cmd !== 'update') {
+    const st = staleness();
+    if (st.stale) process.on('exit', () => console.error(banner(st)));
+  }
+
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return console.log(USAGE);
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') return console.log(VERSION);
 
@@ -245,15 +257,32 @@ async function main() {
     return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
   }
 
+  if (cmd === 'update') {
+    const result = await update({ yes: args.flags.yes, json: args.json });
+    if (result.data.ok === false) process.exitCode = 1;
+    return console.log(args.json ? JSON.stringify({ ok: result.data.ok !== false, command: 'update', ...result.data })
+                                 : result.human);
+  }
+
   if (!NEEDS_BROWSER.has(cmd)) {
     console.error(`unknown command "${cmd}"\n\n${USAGE}`);
     process.exitCode = 2;
     return;
   }
 
+  // doctor is the one command where registry latency is acceptable, so it is
+  // what keeps the cache warm for every gesture command.
+  if (cmd === 'doctor' && !args.flags.noUpdateCheck && cacheIsStale()) await fetchLatest();
+
   const result = await run(args, cmd, rest);
   if (args.quiet) return;
-  console.log(args.json ? JSON.stringify({ ok: true, command: cmd, ...result.data }) : result.human);
+
+  const upd = args.flags.noUpdateCheck ? null : updateField(staleness());
+  if (args.json) {
+    console.log(JSON.stringify({ ok: true, command: cmd, ...result.data, ...(upd ? { update: upd } : {}) }));
+  } else {
+    console.log(result.human);
+  }
 }
 
 main().catch(err => {
