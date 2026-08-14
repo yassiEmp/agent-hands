@@ -14,6 +14,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 
 import { approveWhilePending } from './approve.mjs';
+import { record } from './audit.mjs';
 
 export function pipeName(wsUrl) {
   const h = crypto.createHash('sha1').update(wsUrl).digest('hex').slice(0, 12);
@@ -45,12 +46,21 @@ async function main() {
   // clicks it for us while the handshake is pending; without agent-win, a human clicks instead.
   const ws = new WebSocket(wsUrl);
   const approved = new AbortController();
-  approveWhilePending(approved.signal, msg => console.error(`daemon: ${msg}`));
+  record(wsUrl, { ev: 'approve-begin', pid: process.pid, auto: !process.env.AGENT_HANDS_NO_APPROVE });
+  approveWhilePending(approved.signal, msg => {
+    console.error(`daemon: ${msg}`);
+    // The moment a machine clicked a security prompt on the user's behalf.
+    record(wsUrl, { ev: 'approve-clicked', msg });
+  });
   try {
     await new Promise((ok, bad) => {
       ws.addEventListener('open', ok, { once: true });
       ws.addEventListener('error', () => bad(new Error('browser refused the socket')), { once: true });
     });
+    record(wsUrl, { ev: 'open', pid: process.pid });
+  } catch (e) {
+    record(wsUrl, { ev: 'refused', err: String(e.message || e) });
+    throw e;
   } finally {
     approved.abort();
   }
@@ -77,6 +87,11 @@ async function main() {
 
   const server = net.createServer(sock => {
     clients.add(sock);
+    // A Buffer concatenated onto a string decodes per chunk, so any multi-byte
+    // character split across a chunk boundary becomes replacement characters.
+    // Harmless while messages are small; a snapshot of a French page ("Autoriser")
+    // crosses boundaries constantly, and the corrupted line throws below.
+    sock.setEncoding('utf8');
     let buf = '';
     sock.on('data', chunk => {
       buf += chunk;
@@ -84,8 +99,15 @@ async function main() {
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
         if (!line) continue;
-        const msg = JSON.parse(line);
+        let msg;
+        // One malformed line must not kill the relay: this handler has no
+        // caller to catch it, and every concurrent CLI would hang.
+        try { msg = JSON.parse(line); } catch { continue; }
         if (msg.__ping) { sock.write(JSON.stringify({ __pong: true, wsUrl }) + '\n'); continue; }
+        if (msg.__hello) { sock.__said = true; record(wsUrl, { ev: 'client', ...msg.__hello }); continue; }
+        // A client that drives the browser without introducing itself is worth
+        // one line: silence is the only signal a bypass leaves behind.
+        if (!sock.__said) { sock.__said = true; record(wsUrl, { ev: 'no-hello' }); }
         const clientId = msg.id;
         const upstreamId = ++seq;
         msg.id = upstreamId;

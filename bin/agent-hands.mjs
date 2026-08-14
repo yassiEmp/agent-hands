@@ -9,6 +9,7 @@ import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRe
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } from '../cli/version.mjs';
+import { tail } from '../cli/audit.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -35,6 +36,7 @@ COMMANDS
   where                       print last cursor position
   doctor                      check the session is reachable
   update [--yes]              report a newer version; --yes applies it
+  audit [--times <n>]         who authorised and drove this browser, and when
   skills list                 list bundled docs
   skills get core [--full]    print the agent guide
 
@@ -255,6 +257,17 @@ async function main() {
     const p = readPos(args.session);
     if (args.json) return console.log(JSON.stringify(p ?? null));
     return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
+  }
+
+  if (cmd === 'audit') {
+    const { port, browserPath } = resolveEndpoint({
+      session: args.session, cdp: args.cdp, browser: args.browser, userDataDir: args.userDataDir,
+    });
+    const rows = tail(`ws://127.0.0.1:${port}${browserPath ?? ''}`, args.flags.times ?? 50);
+    if (args.json) return console.log(JSON.stringify({ ok: true, command: 'audit', events: rows }));
+    if (!rows.length) return console.log('no audit events for this browser yet.');
+    return console.log(rows.map(r =>
+      `${r.t}  ${r.ev.padEnd(15)} ${r.cmd ?? r.msg ?? r.err ?? (r.pid ? `pid ${r.pid}` : '')}`).join('\n'));
   }
 
   if (cmd === 'update') {

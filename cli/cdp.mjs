@@ -18,7 +18,8 @@ import os from 'node:os';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { approveWhilePending } from './approve.mjs';
+// Deliberately no approve.mjs import. Approval belongs to daemon.mjs alone.
+import { safeCommand } from './audit.mjs';
 import { pipeName, probe } from './daemon.mjs';
 
 const HOME = os.homedir();
@@ -176,6 +177,21 @@ export class CDP {
     if (!browserPath) {
       throw new Error(`no CDP endpoint on port ${port}. The browser may have exited.`);
     }
+    // A dead browser leaves its DevToolsActivePort behind, and that file looks
+    // exactly like a live M144 endpoint: both serve no /json/list. Without this
+    // check the connect walks into the daemon and reports "relay failed to
+    // start", which sends the reader hunting for a relay bug that is not there.
+    if (!(await portAlive(port))) {
+      const { file } = readPortFile(profileDir(opts.session ?? 'work')) ?? {};
+      throw Object.assign(new Error(
+        `nothing is listening on port ${port} — the browser it belonged to has exited.\n` +
+        (opts.browser || opts.userDataDir || opts.cdp
+          ? `  Reopen chrome://inspect#remote-debugging and read the current port.`
+          : `  session "${opts.session}" is not running. Its DevToolsActivePort is stale.\n` +
+            (file ? `  delete: ${file}\n` : '') +
+            `  start it: agent-browser --session ${opts.session} --profile "${profileDir(opts.session)}" open <url> --headed`)
+      ), { code: 'ENOSESSION' });
+    }
     return CDP.attachFlat(port, browserPath, opts);
   }
 
@@ -202,9 +218,12 @@ export class CDP {
   // authorize every new CDP connection, so a per-invocation socket would ask
   // on every command. One daemon means one prompt per browser run.
   static async attachFlat(port, browserPath, opts = {}) {
-    const { shared = true, tab, activate = true } = opts;
+    const { tab, activate = true } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
-    const cdp = shared ? await DaemonCDP.open(wsUrl) : await CDP.open(wsUrl, { approve: true });
+    // Always the daemon. There is deliberately no un-shared variant: a socket
+    // that can authorise itself is a second door into a browser holding the
+    // user's live session, and the daemon is the only audited one.
+    const cdp = await DaemonCDP.open(wsUrl);
     // Same reason as attachPerPage: a throw here (no tab matched, a frozen tab,
     // a dead target) leaks the pipe and the process never exits. `--tab typo`
     // used to print its error and hang until the caller killed it.
@@ -221,21 +240,16 @@ export class CDP {
     }
   }
 
-  // `approve` is for external browsers only. Their handshake hangs behind a native modal that CDP
-  // cannot see, so agent-win is asked to click it while this promise is pending. Pooled sessions
-  // never prompt, so they never pay for the probe.
-  static async open(wsUrl, { approve = false } = {}) {
+  // No approval here, by design. This opener serves pooled per-page sockets,
+  // which never prompt. Authorising a browser is the daemon's job alone, so
+  // approve.mjs has exactly one importer and "can this codebase authorise a
+  // browser?" stays a one-line grep with one answer.
+  static async open(wsUrl) {
     const ws = new WebSocket(wsUrl);
-    const approver = approve ? new AbortController() : null;
-    if (approver) approveWhilePending(approver.signal);
-    try {
-      await new Promise((ok, bad) => {
-        ws.addEventListener('open', ok, { once: true });
-        ws.addEventListener('error', () => bad(new Error('CDP socket refused')), { once: true });
-      });
-    } finally {
-      approver?.abort();
-    }
+    await new Promise((ok, bad) => {
+      ws.addEventListener('open', ok, { once: true });
+      ws.addEventListener('error', () => bad(new Error('CDP socket refused')), { once: true });
+    });
     const cdp = new CDP(ws);
     ws.addEventListener('message', ev => {
       const msg = JSON.parse(ev.data);
@@ -296,6 +310,13 @@ export class DaemonCDP extends CDP {
     });
 
     const cdp = new DaemonCDP(sock);
+    sock.setEncoding('utf8');   // see daemon.mjs: chunk-split multi-byte chars
+    // Introduce ourselves before any CDP traffic. Verb and flag names only —
+    // never argument values, which carry passwords. See audit.mjs.
+    sock.write(JSON.stringify({ __hello: {
+      pid: process.pid,
+      cmd: safeCommand(process.argv[2] ?? '?', process.argv.slice(3)),
+    } }) + '\n');
     let buf = '';
     sock.on('data', chunk => {
       buf += chunk;
@@ -303,7 +324,8 @@ export class DaemonCDP extends CDP {
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
         if (!line) continue;
-        const msg = JSON.parse(line);
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
         const p = cdp.pending.get(msg.id);
         if (!p) continue;
         cdp.pending.delete(msg.id);
@@ -389,6 +411,18 @@ async function enableFocusEmulation(cdp) {
     cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}),
     new Promise(r => setTimeout(r, 2000)),
   ]);
+}
+
+// Does anything hold this port open? A live M144 endpoint accepts TCP and
+// serves no /json/list; a dead browser's leftover port file does neither.
+function portAlive(port, timeout = 1500) {
+  return new Promise(resolve => {
+    const s = net.connect({ port: Number(port), host: '127.0.0.1' });
+    const done = v => { s.destroy(); resolve(v); };
+    s.setTimeout(timeout, () => done(false));
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+  });
 }
 
 // null means the endpoint serves no /json/list, not that there are no tabs.
