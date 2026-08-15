@@ -39,6 +39,8 @@ START HERE  (agents: this is the whole loop)
 COMMANDS
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
+  text [selector]             read visible text (default: body)
+  open <url>                  navigate this tab and wait for load
   click --ref @e12            target a snapshot ref — most robust, works in iframes
   click <selector>            target a CSS selector
   click --text "Label"        target by visible text (ranked, best match wins)
@@ -153,7 +155,7 @@ function parseArgs(argv) {
 }
 
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open']);
 
 async function run(args, cmd, rest) {
   const { session, speed } = args;
@@ -245,6 +247,38 @@ async function run(args, cmd, rest) {
       case 'scroll': {
         const s = await scrollBy(cdp, Number(rest[0] ?? 400), speed);
         return { data: s, human: `✓ scroll ${s.pixels}px / ${s.ms}ms -> y=${s.y}` };
+      }
+
+      // Reading and navigating belong here for one reason: agent-browser cannot
+      // attach to an external browser at all. Without these an agent hits a wall
+      // mid-task and reaches for a raw script, which is the failure this CLI
+      // exists to prevent. For a pooled session agent-browser is still better.
+      case 'text': {
+        const sel = rest[0] || 'body';
+        const t = await cdp.evaluate(
+          `(document.querySelector(${JSON.stringify(sel)})?.innerText || '')`
+            + `.replace(/\\n{3,}/g, '\\n\\n').slice(0, ${args.flags.max ?? 20000})`);
+        if (t == null || t === '') {
+          throw Object.assign(new Error(`no element matches "${sel}", or it has no text.`),
+            { code: 'EUSAGE' });
+        }
+        return { data: { selector: sel, chars: t.length, text: t }, human: t };
+      }
+
+      case 'open': {
+        const url = rest[0];
+        if (!url) throw Object.assign(new Error('open needs a url'), { code: 'EUSAGE' });
+        await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
+        // Settle before returning: an agent that snapshots immediately would
+        // otherwise capture the old page and mint refs that cannot resolve.
+        let now = '';
+        for (let i = 0; i < 20; i++) {
+          await sleep(250);
+          now = await cdp.evaluate('document.readyState + "|" + location.href');
+          if (String(now).startsWith('complete')) break;
+        }
+        const href = String(now).split('|')[1] || url;
+        return { data: { url: href }, human: `✓ open ${href}` };
       }
 
       case 'snapshot': {

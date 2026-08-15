@@ -95,11 +95,14 @@ function spawnOnce({ cmd, pre, home }, args) {
 async function agentWin(args) {
   if (RESOLVED === null) return null;                 // known absent
   if (RESOLVED) return spawnOnce(RESOLVED, args);
+  // Probe with the REAL arguments. A separate `help` call spent a whole Python
+  // start per connect and threw the answer away, and this runs while a modal is
+  // holding the browser handshake open, so every second is paid by the user.
   for (const c of candidates()) {
-    const probe = await spawnOnce(c, ['help']);
-    if (probe !== null) {
+    const out = await spawnOnce(c, args);
+    if (out !== null) {
       RESOLVED = c;
-      return spawnOnce(c, args);
+      return out;
     }
   }
   RESOLVED = null;
