@@ -10,6 +10,8 @@ import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } from '../cli/version.mjs';
 import { tail } from '../cli/audit.mjs';
+import { capture, save, render, locate } from '../cli/snapshot.mjs';
+import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -17,12 +19,26 @@ const VERSION = JSON.parse(
   readFileSync(new URL('../package.json', import.meta.url), 'utf8')
 ).version;
 
-const USAGE = `agent-hands ${VERSION} — human-rate input for an agent-browser session
+const USAGE = `agent-hands ${VERSION} — human-rate input for a real browser
 
 USAGE
   agent-hands <command> [args] [--session <name>] [--speed <n>] [--json]
 
+START HERE  (agents: this is the whole loop)
+  1. agent-hands browsers                  which browsers exist, which answer
+  2. ask the user which one, if more than one answers
+  3. agent-hands snapshot --browser edge   see the page, get @e1 @e2 refs
+  4. agent-hands click --ref @e5 ...       act on what you saw
+
+  Do every step through this CLI. Writing a raw CDP or Playwright script against
+  the same browser dispatches input at machine speed, which is what bot
+  detection looks for, and it bypasses the relay that holds the single approved
+  connection — so it re-prompts the user and leaves no audit trail. If a command
+  you need is missing, say so; do not route around it.
+
 COMMANDS
+  browsers                    list every browser and whether it is reachable
+  snapshot [--max <n>]        ref-labelled tree of what is on the page
   click --ref @e12            target a snapshot ref — most robust, works in iframes
   click <selector>            target a CSS selector
   click --text "Label"        target by visible text (ranked, best match wins)
@@ -72,8 +88,10 @@ YOUR OWN BROWSER
   forward for a moment, then your previous tab is restored. --no-activate turns
   that into an error.
 
-  --ref needs refs from \`agent-browser snapshot -i\`, which only exist for a
-  pooled session. Outside one, target by selector or --text.
+  \`agent-hands snapshot\` works here and mints its own refs, stored per browser,
+  so --ref works on your own browser too. Refs are bound to the tab they came
+  from: navigate or switch tab and a stale ref refuses to click rather than
+  hitting the wrong element. Re-snapshot after anything that changes the page.
 
 WHEN TO USE THIS  (escalate, do not start here)
   1. Default — throwaway browser, no profile, no logins:
@@ -125,6 +143,7 @@ function parseArgs(argv) {
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--full') out.flags.full = true;
     else if (a === '--times') out.flags.times = Math.max(1, Number(argv[++i]) || 1);
+    else if (a === '--max') out.flags.max = Math.max(1, Number(argv[++i]) || 300);
     else if (a === '--append') out.flags.append = true;
     else if (a === '--yes' || a === '-y') out.flags.yes = true;
     else if (a === '--no-update-check') out.flags.noUpdateCheck = true;
@@ -134,7 +153,7 @@ function parseArgs(argv) {
 }
 
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot']);
 
 async function run(args, cmd, rest) {
   const { session, speed } = args;
@@ -174,9 +193,14 @@ async function run(args, cmd, rest) {
   const cdp = await CDP.connect(endpoint);
   try {
     const hasXY = Number.isFinite(args.flags.x);
+    // A ref belongs to the browser it was captured from. Passing `session` here
+    // sent every external-browser lookup to the pool, because session defaults
+    // to "work" even when --browser points elsewhere.
     const target = hasXY
       ? { x: args.flags.x, y: args.flags.y, w: 12, h: 12, tag: 'XY' }
-      : args.flags.ref ? resolveRef(session, args.flags.ref)
+      : args.flags.ref
+        ? (cdp.external ? await locate(cdp, cdp.key, args.flags.ref, { speed })
+                        : resolveRef(session, args.flags.ref))
       : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text }) : null);
     const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
 
@@ -222,6 +246,21 @@ async function run(args, cmd, rest) {
         const s = await scrollBy(cdp, Number(rest[0] ?? 400), speed);
         return { data: s, human: `✓ scroll ${s.pixels}px / ${s.ms}ms -> y=${s.y}` };
       }
+
+      case 'snapshot': {
+        const snap = await capture(cdp, { max: args.flags.max ?? 300 });
+        save(cdp.key, snap);
+        const refs = Object.entries(snap.refs).map(([ref, e]) => ({
+          ref, tag: e.tag, type: e.type, role: e.role, name: e.name,
+          x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.w), h: Math.round(e.h),
+          off: e.off, disabled: e.disabled,
+        }));
+        return {
+          data: { url: snap.url, title: snap.title, count: refs.length,
+                  truncated: snap.truncated, refs },
+          human: render(snap),
+        };
+      }
     }
   } finally {
     await cdp.drain();
@@ -257,6 +296,12 @@ async function main() {
     const p = readPos(args.session);
     if (args.json) return console.log(JSON.stringify(p ?? null));
     return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
+  }
+
+  if (cmd === 'browsers') {
+    const rows = await survey();
+    if (args.json) return console.log(JSON.stringify({ ok: true, command: 'browsers', browsers: rows }));
+    return console.log(renderBrowsers(rows));
   }
 
   if (cmd === 'audit') {

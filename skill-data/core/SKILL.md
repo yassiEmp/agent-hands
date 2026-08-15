@@ -5,7 +5,38 @@ description: Core agent-hands usage guide. Read before running any agent-hands c
 
 # agent-hands core
 
-Human-rate mouse and keyboard for a running `agent-browser` session.
+Human-rate mouse and keyboard for a real browser.
+
+## The loop, and why you stay inside it
+
+```bash
+agent-hands browsers                    # what exists, what is reachable
+# more than one reachable? ASK THE USER which to drive.
+agent-hands snapshot --browser edge     # see the page: @e1 @e2 @e3
+agent-hands click --ref @e5 --browser edge
+```
+
+`snapshot` mints its own refs now, so this works on the user's own browser and
+not only on a pooled session. You never need a raw CDP script to see a page.
+
+**Do not write one.** A hand-rolled CDP or Playwright script against the same
+browser costs three things at once:
+
+- **It dispatches input instantly.** That is the signal behaviour-scoring sites
+  grade. This tool exists to avoid it; bypassing it forfeits the whole point.
+- **It opens its own connection.** The relay holds the single approved socket,
+  so a second connection re-prompts the user, and on a browser holding their
+  live session that prompt is the only thing standing between an agent and
+  their accounts.
+- **It leaves no trace.** `agent-hands audit` records every authorisation and
+  every client. A raw socket appears there as an absence.
+
+Measured against `bot-detector.rebrowser.net`: a snapshot, a scroll and a mouse
+move through this CLI triggered **no** detection — no `Runtime.enable` leak, no
+main-world execution. The walk uses `Runtime.evaluate` and enables no domain,
+which is what keeps it quiet.
+
+If a verb you need is missing, say so and stop. Do not route around the CLI.
 
 ## Decide before you launch anything
 

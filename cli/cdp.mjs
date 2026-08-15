@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // Deliberately no approve.mjs import. Approval belongs to daemon.mjs alone.
@@ -62,7 +63,7 @@ export function browserNames() {
   return Object.keys(CHANNELS[process.platform] || CHANNELS.linux);
 }
 
-function browserDir(name) {
+export function browserDir(name) {
   const table = CHANNELS[process.platform] || CHANNELS.linux;
   const rel = table[name];
   if (!rel) return null;
@@ -79,7 +80,7 @@ export function profileDir(session) {
 
 // Both lines matter. Line 1 is the port. Line 2 is the browser target path,
 // which is the only route the M144 server accepts.
-function readPortFile(dir) {
+export function readPortFile(dir) {
   const file = path.join(dir, 'DevToolsActivePort');
   if (!fs.existsSync(file)) return null;
   const [port, browserPath] = fs.readFileSync(file, 'utf8').split('\n').map(s => s.trim());
@@ -171,8 +172,12 @@ export class CDP {
     const opts = typeof sessionOrOpts === 'string' ? { session: sessionOrOpts } : sessionOrOpts;
     const { port, browserPath } = resolveEndpoint(opts);
 
+    const external = Boolean(opts.cdp || opts.browser || opts.userDataDir);
+    const key = storeKey(opts);
+    const tag = cdp => Object.assign(cdp, { key, external });
+
     const targets = await listTargets(port);
-    if (targets) return CDP.attachPerPage(targets);
+    if (targets) return tag(await CDP.attachPerPage(targets, opts.tab));
 
     if (!browserPath) {
       throw new Error(`no CDP endpoint on port ${port}. The browser may have exited.`);
@@ -192,12 +197,12 @@ export class CDP {
             `  start it: agent-browser --session ${opts.session} --profile "${profileDir(opts.session)}" open <url> --headed`)
       ), { code: 'ENOSESSION' });
     }
-    return CDP.attachFlat(port, browserPath, opts);
+    return tag(await CDP.attachFlat(port, browserPath, opts));
   }
 
   // Pre-existing path. One socket per page, no sessionId.
-  static async attachPerPage(targets) {
-    const page = pickPage(targets);
+  static async attachPerPage(targets, tab) {
+    const page = pickPage(targets, tab);
     const cdp = await CDP.open(page.webSocketDebuggerUrl);
     // Anything that throws from here on must close the socket first. The caller
     // never received `cdp`, so nobody else can, and an open handle keeps the
@@ -231,6 +236,7 @@ export class CDP {
       const { targetInfos } = await cdp.send('Target.getTargets');
       const page = await choosePage(cdp, targetInfos, { tab, activate });
       cdp.sessionId = page.sessionId;
+      cdp.targetId = page.targetId;   // refs bind to a tab, see snapshot.mjs
       cdp.url = page.url;
       await enableFocusEmulation(cdp);
       return cdp;
@@ -359,7 +365,22 @@ export class DaemonCDP extends CDP {
         if (await probe(pipe)) return ok();
         if (dead) {
           const why = stderr.trim().split('\n').pop() || `exited without a message`;
-          return bad(new Error(`relay failed to start: ${why}`));
+          // A refusal here is almost never a relay bug. A browser that was
+          // closed can leave a background process holding the port and
+          // answering HTTP, so the endpoint looks alive right up until the
+          // websocket, which it rejects in milliseconds. Say that, because the
+          // message used to send readers hunting through the daemon.
+          const refused = /refused/i.test(why);
+          return bad(Object.assign(new Error(
+            `relay failed to start: ${why}` +
+            (refused
+              ? `\n  The debugging port answers, but the browser rejected the socket.` +
+                `\n  Usually it was closed and left the port behind, or the endpoint uuid` +
+                `\n  rotated when remote debugging was toggled.` +
+                `\n  Check what is really reachable:  agent-hands browsers` +
+                `\n  Then re-enable debugging in the browser you want and retry.`
+              : '')
+          ), { code: refused ? 'ENOSESSION' : 'EFAIL' }));
         }
         if (Date.now() > deadline) {
           return bad(new Error(
@@ -413,9 +434,22 @@ async function enableFocusEmulation(cdp) {
   ]);
 }
 
+// Refs and cursor position belong to a BROWSER, not to --session. `session`
+// defaults to "work" even when --browser points somewhere else entirely, so
+// keying state on it made two different external browsers share one cursor
+// file, and sent `--ref` lookups to whatever the pool happened to be running.
+// Same input as pipeName(), so a pipe, a ref store and an audit line correlate.
+export function storeKey(opts = {}) {
+  if (!opts.cdp && !opts.browser && !opts.userDataDir) return opts.session ?? 'work';
+  const { port, browserPath } = resolveEndpoint(opts);
+  const h = crypto.createHash('sha1')
+    .update(`ws://127.0.0.1:${port}${browserPath ?? ''}`).digest('hex').slice(0, 8);
+  return `${opts.browser || (opts.userDataDir ? 'dir' : 'cdp')}-${h}`;
+}
+
 // Does anything hold this port open? A live M144 endpoint accepts TCP and
 // serves no /json/list; a dead browser's leftover port file does neither.
-function portAlive(port, timeout = 1500) {
+export function portAlive(port, timeout = 1500) {
   return new Promise(resolve => {
     const s = net.connect({ port: Number(port), host: '127.0.0.1' });
     const done = v => { s.destroy(); resolve(v); };
@@ -437,8 +471,22 @@ async function listTargets(port) {
   }
 }
 
-function pickPage(targets) {
+function pickPage(targets, tab) {
   const pages = targets.filter(t => t.type === 'page');
+  // --tab used to be honoured only on the flat path, so on a classic endpoint
+  // it was silently dropped and the command ran against whatever tab came
+  // first. A flag that is quietly ignored is worse than one that errors.
+  if (tab) {
+    const q = String(tab).toLowerCase();
+    const hit = pages.find(t => `${t.title} ${t.url}`.toLowerCase().includes(q));
+    if (!hit) {
+      throw Object.assign(new Error(
+        `no tab matches "${tab}". Open tabs:\n` +
+        pages.map(t => `  ${(t.title || '').slice(0, 48).padEnd(48)}  ${t.url.slice(0, 60)}`).join('\n')
+      ), { code: 'EUSAGE' });
+    }
+    return hit;
+  }
   const page = pages.find(t => !/^(chrome|edge|devtools):/.test(t.url)) || pages[0];
   if (!page) throw new Error('no page target found. Open a tab first.');
   return page;
