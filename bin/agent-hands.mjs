@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // agent-hands — human-rate mouse and keyboard for an agent-browser session.
 //
-// Exit codes: 0 ok, 1 runtime failure, 2 usage error.
+// Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved.
 
 import { readFileSync } from 'node:fs';
 import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint } from '../cli/cdp.mjs';
@@ -12,6 +12,7 @@ import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } fro
 import { tail } from '../cli/audit.mjs';
 import { capture, save, render, locate } from '../cli/snapshot.mjs';
 import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
+import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -40,6 +41,7 @@ COMMANDS
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
   text [selector]             read visible text (default: body)
+  challenge                   is an anti-bot challenge blocking this page?
   open <url>                  navigate this tab and wait for load
   click --ref @e12            target a snapshot ref — most robust, works in iframes
   click <selector>            target a CSS selector
@@ -66,6 +68,8 @@ OPTIONS
   --tab <match>      choose the tab by title or url
   --no-activate      never bring a frozen tab to the front; error instead
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
+  --pause-on-challenge   stop on an anti-bot challenge and wait for the human
+  --challenge-wait <s>   how long to wait for you to clear it (default 180)
   --json             machine-readable output — for agents
   --quiet            exit code only
 
@@ -94,6 +98,16 @@ YOUR OWN BROWSER
   so --ref works on your own browser too. Refs are bound to the tab they came
   from: navigate or switch tab and a stale ref refuses to click rather than
   hitting the wrong element. Re-snapshot after anything that changes the page.
+
+CHALLENGES
+  A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
+  tool tries to defeat. Those stacks score behaviour and correlate identity
+  across sites, so a forged pass is temporary and costs the account it was
+  spent on. You are already signed in as yourself, so the cheap move is to let
+  the user click it.
+    agent-hands challenge                       # is one blocking this page?
+    agent-hands open <url> --pause-on-challenge # stop, tell them, resume
+  Exit 3 means it was still there when the wait ran out. Nothing was bypassed.
 
 WHEN TO USE THIS  (escalate, do not start here)
   1. Default — throwaway browser, no profile, no logins:
@@ -149,16 +163,20 @@ function parseArgs(argv) {
     else if (a === '--append') out.flags.append = true;
     else if (a === '--yes' || a === '-y') out.flags.yes = true;
     else if (a === '--no-update-check') out.flags.noUpdateCheck = true;
+    else if (a === '--pause-on-challenge') out.flags.pauseOnChallenge = true;
+    else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
   return out;
 }
 
+const CHALLENGE_WAIT_DEFAULT = 180000;
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge']);
 
 async function run(args, cmd, rest) {
   const { session, speed } = args;
+  const CHALLENGE_WAIT = args.flags.challengeWait ? args.flags.challengeWait * 1000 : CHALLENGE_WAIT_DEFAULT;
   const endpoint = {
     session, cdp: args.cdp, browser: args.browser, userDataDir: args.userDataDir,
     tab: args.tab, activate: args.activate !== false,
@@ -278,7 +296,34 @@ async function run(args, cmd, rest) {
           if (String(now).startsWith('complete')) break;
         }
         const href = String(now).split('|')[1] || url;
+
+        if (args.flags.pauseOnChallenge) {
+          const v = await checkChallenge(cdp);
+          if (v.challenged) {
+            // stderr: the human reads this while stdout stays the command's result.
+            console.error(renderChallenge(v));
+            console.error(`\n  waiting up to ${Math.round(CHALLENGE_WAIT / 1000)}s for you to clear it…`);
+            const done = await waitUntilCleared(cdp, {
+              timeoutMs: CHALLENGE_WAIT, log: m => console.error(m),
+            });
+            if (!done) {
+              throw Object.assign(new Error(
+                `challenge still present after ${Math.round(CHALLENGE_WAIT / 1000)}s — ${
+                  v.blocking.map(b => b.vendor).join(', ')}.\n` +
+                `  Clear it in the browser, then re-run. Nothing was bypassed.`
+              ), { code: 'ECHALLENGE' });
+            }
+            return { data: { url: href, challenge: { vendor: v.blocking.map(b => b.vendor), cleared: true } },
+                     human: `✓ open ${href}  (challenge cleared by you)` };
+          }
+        }
         return { data: { url: href }, human: `✓ open ${href}` };
+      }
+
+      case 'challenge': {
+        const v = await checkChallenge(cdp);
+        if (v.challenged) process.exitCode = 3;
+        return { data: v, human: renderChallenge(v) };
       }
 
       case 'snapshot': {
@@ -377,12 +422,15 @@ async function main() {
   }
 }
 
+// 3 is its own code so a caller can tell "a human needs to click something"
+// apart from a real failure, and retry instead of giving up.
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3 };
+
 main().catch(err => {
-  const usage = err.code === 'EUSAGE';
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify({ ok: false, error: err.message, code: err.code ?? 'EFAIL' }));
   } else {
     console.error('✗ ' + err.message);
   }
-  process.exitCode = usage ? 2 : 1;
+  process.exitCode = EXIT[err.code] ?? 1;
 });
