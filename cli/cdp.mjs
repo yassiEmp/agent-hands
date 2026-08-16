@@ -210,6 +210,7 @@ export class CDP {
     try {
       cdp.url = page.url;
       await enableFocusEmulation(cdp);
+      await clearAutomationHint(cdp);
       return cdp;
     } catch (e) {
       cdp.close();
@@ -239,6 +240,7 @@ export class CDP {
       cdp.targetId = page.targetId;   // refs bind to a tab, see snapshot.mjs
       cdp.url = page.url;
       await enableFocusEmulation(cdp);
+      await clearAutomationHint(cdp);
       return cdp;
     } catch (e) {
       cdp.close();
@@ -430,6 +432,59 @@ export class DaemonCDP extends CDP {
 async function enableFocusEmulation(cdp) {
   await Promise.race([
     cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}),
+    new Promise(r => setTimeout(r, 2000)),
+  ]);
+}
+
+// Attaching over CDP sets navigator.webdriver = true, and a page reads it in one
+// line. Three things were measured on Chrome 151 before settling on this:
+//
+//   Emulation.setAutomationOverride {enabled:false} returns {} — no error, the
+//   method exists — and does NOT clear the flag. Not after a navigation inside
+//   the same session either. It looks like a fix and is not one.
+//
+//   The getter must return BOOLEAN FALSE, not undefined. Real Chrome reports
+//   false. Deleting the property is its own tell: rebrowser's detector answers
+//   "This property shouldn't be undefined. You might have it deleted manually."
+//   and stays red. Shadowing it with undefined trades one red flag for another.
+//
+//   Page.enable is required. addScriptToEvaluateOnNewDocument returns an
+//   identifier without it and the script never runs.
+//
+// The accessor goes on Navigator.prototype, where the native one lives. An own
+// property on the `navigator` instance is its own tell: real Chrome answers
+// undefined to Object.getOwnPropertyDescriptor(navigator, 'webdriver').
+//
+// Scope, stated honestly:
+//
+//   Documents created while we are attached are covered, so this covers pages
+//   opened through `agent-hands open`. The shim survives in that document after
+//   we disconnect, because it was installed at document creation. A page the
+//   user navigates to later, with nothing attached, is not covered.
+//
+//   The script runs in the page's MAIN world, so it shares an execution context
+//   with any anti-fraud script on the page. Fine for a one-line defineProperty.
+//   Weigh it again before putting anything larger in here.
+//
+//   A redefined getter is still detectable through Function.prototype.toString:
+//   the native one reports "function get webdriver() { [native code] }" and this
+//   one reports an arrow function. rebrowser does not probe that. CreepJS does.
+//   So green here means green on this detector. If a real target ever rejects
+//   us, look here first.
+//
+// Page.enable is a different domain from Runtime.enable and does not trip the
+// runtimeEnableLeak detector.
+const WEBDRIVER_SHIM =
+  "Object.defineProperty(Navigator.prototype,'webdriver',"
+  + "{get:()=>false,configurable:true,enumerable:true});";
+
+async function clearAutomationHint(cdp) {
+  await Promise.race([
+    (async () => {
+      await cdp.send('Page.enable').catch(() => {});
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: WEBDRIVER_SHIM })
+        .catch(() => {});
+    })(),
     new Promise(r => setTimeout(r, 2000)),
   ]);
 }
