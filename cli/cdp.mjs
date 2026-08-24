@@ -429,11 +429,21 @@ export class DaemonCDP extends CDP {
 // A backgrounded tab can accept this command and never acknowledge it. The
 // promise then neither resolves nor rejects, so .catch() cannot rescue it and
 // the caller hangs forever. The call is best-effort, so bound it and continue.
+// Promise.race leaves the loser pending. A bare setTimeout keeps Node's event
+// loop alive until it fires, so a 2s guard that was won in 5ms still cost the
+// process a full 2s before it could exit. Measured: every browser-touching
+// command paid ~2s of dead wait at teardown because of this. Clear the timer.
+function withDeadline(work, ms) {
+  let timer;
+  return Promise.race([
+    work,
+    new Promise(resolve => { timer = setTimeout(resolve, ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function enableFocusEmulation(cdp) {
-  await Promise.race([
-    cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}),
-    new Promise(r => setTimeout(r, 2000)),
-  ]);
+  await withDeadline(
+    cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}), 2000);
 }
 
 // Attaching over CDP sets navigator.webdriver = true, and a page reads it in one
@@ -479,14 +489,11 @@ const WEBDRIVER_SHIM =
   + "{get:()=>false,configurable:true,enumerable:true});";
 
 async function clearAutomationHint(cdp) {
-  await Promise.race([
-    (async () => {
+  await withDeadline((async () => {
       await cdp.send('Page.enable').catch(() => {});
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: WEBDRIVER_SHIM })
         .catch(() => {});
-    })(),
-    new Promise(r => setTimeout(r, 2000)),
-  ]);
+    })(), 2000);
 }
 
 // Refs and cursor position belong to a BROWSER, not to --session. `session`

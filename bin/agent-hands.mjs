@@ -3,7 +3,8 @@
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, createReadStream } from 'node:fs';
+import readline from 'node:readline';
 import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint } from '../cli/cdp.mjs';
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
@@ -38,6 +39,7 @@ START HERE  (agents: this is the whole loop)
   you need is missing, say so; do not route around it.
 
 COMMANDS
+  run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
   text [selector]             read visible text (default: body)
@@ -98,6 +100,26 @@ YOUR OWN BROWSER
   so --ref works on your own browser too. Refs are bound to the tab they came
   from: navigate or switch tab and a stale ref refuses to click rather than
   hitting the wrong element. Re-snapshot after anything that changes the page.
+
+BATCH  (use this for anything more than 2-3 steps)
+  Every command pays a process start and a connect. "run" pays both once and
+  streams NDJSON results, one per line, in order.
+
+    printf '%s\n' 'open https://example.com' 'snapshot' 'text h1' \
+      | agent-hands run --browser edge
+
+  A batch line is just CLI arguments, so there is no new syntax to learn and
+  every command above works unchanged. JSON lines work too, for generated input:
+    {"cmd":"click","ref":"@e17"}
+    {"cmd":"fill","args":["#q","hello"]}
+
+  Blank lines and # comments are skipped. One failing line does not stop the
+  batch: it emits {"ok":false,...} and the run continues. --stop-on-error
+  changes that. Exit code is the worst line's.
+
+  Human pacing still applies between input commands. Separate processes used to
+  leave a natural gap; batching removes it, so a small pause is inserted (--gap
+  ms, default 250, 0 disables). Reads are exempt - they emit no input event.
 
 CHALLENGES
   A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
@@ -164,6 +186,9 @@ function parseArgs(argv) {
     else if (a === '--yes' || a === '-y') out.flags.yes = true;
     else if (a === '--no-update-check') out.flags.noUpdateCheck = true;
     else if (a === '--pause-on-challenge') out.flags.pauseOnChallenge = true;
+    else if (a === '--gap') out.flags.gap = Math.max(0, Number(argv[++i]) || 0);
+    else if (a === '--file') out.flags.file = argv[++i];
+    else if (a === '--stop-on-error') out.flags.stopOnError = true;
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
@@ -174,7 +199,7 @@ const CHALLENGE_WAIT_DEFAULT = 180000;
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
 const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge']);
 
-async function run(args, cmd, rest) {
+async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
   const CHALLENGE_WAIT = args.flags.challengeWait ? args.flags.challengeWait * 1000 : CHALLENGE_WAIT_DEFAULT;
   const endpoint = {
@@ -186,7 +211,7 @@ async function run(args, cmd, rest) {
 
   if (cmd === 'doctor') {
     const { port } = resolveEndpoint(endpoint);
-    const cdp = await CDP.connect(endpoint);
+    const cdp = shared ?? await CDP.connect(endpoint);
     // /json/version does not exist on a 144+ endpoint. Ask the browser itself.
     const info = await browserInfo(cdp.sessionId ? cdp : port);
     const out = {
@@ -196,7 +221,7 @@ async function run(args, cmd, rest) {
       title: await cdp.evaluate('document.title'),
       viewport: await cdp.evaluate('innerWidth + "x" + innerHeight'),
     };
-    await cdp.drain(); cdp.close();
+    if (!shared) { await cdp.drain(); cdp.close(); }
     const warn = out.headless
       ? '\n  ⚠ HEADLESS — logins will not survive here and Google sign-in is refused.'
         + `\n    relaunch: agent-browser --session ${session} --profile "${profileDir(session)}" open <url> --headed`
@@ -210,7 +235,7 @@ async function run(args, cmd, rest) {
     };
   }
 
-  const cdp = await CDP.connect(endpoint);
+  const cdp = shared ?? await CDP.connect(endpoint);
   try {
     const hasXY = Number.isFinite(args.flags.x);
     // A ref belongs to the browser it was captured from. Passing `session` here
@@ -342,9 +367,113 @@ async function run(args, cmd, rest) {
       }
     }
   } finally {
+    if (!shared) { await cdp.drain(); cdp.close(); }
+  }
+}
+
+// ---------------------------------------------------------------- batch ----
+
+// Read-only verbs emit no input event, so no site can observe their timing and
+// nothing needs pacing before them.
+const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where']);
+
+// A batch line is just CLI arguments. That is the whole design: an agent that
+// can use this CLI can already write a batch, and every verb added later works
+// here for free with no extra wiring.
+//
+//   text h1
+//   click --ref @e17
+//   open https://example.com
+//
+// JSON is accepted too, for callers generating lines programmatically:
+//   {"cmd":"click","ref":"@e17"}
+//   {"cmd":"text","args":["h1"]}
+function lineToArgv(line) {
+  const t = line.trim();
+  if (!t.startsWith('{')) return tokenize(t);
+  const o = JSON.parse(t);
+  if (!o.cmd) throw Object.assign(new Error('batch line needs "cmd"'), { code: 'EUSAGE' });
+  const argv = [o.cmd];
+  const positional = o.args == null ? [] : (Array.isArray(o.args) ? o.args : [o.args]);
+  argv.push(...positional.map(String));
+  for (const [k, v] of Object.entries(o)) {
+    if (k === 'cmd' || k === 'args' || v === false || v == null) continue;
+    const flag = '--' + k.replace(/[A-Z]/g, c => '-' + c.toLowerCase());
+    if (k === 'xy' && Array.isArray(v)) { argv.push('--xy', String(v[0]), String(v[1])); continue; }
+    if (v === true) argv.push(flag);
+    else argv.push(flag, String(v));
+  }
+  return argv;
+}
+
+// Shell-lite: quotes group, nothing else is special. Enough for a CLI line and
+// small enough to reason about; anything harder should use the JSON form.
+function tokenize(line) {
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(line))) out.push(m[1] ?? m[2] ?? m[3]);
+  return out;
+}
+
+async function runBatch(args) {
+  const endpoint = {
+    session: args.session, cdp: args.cdp, browser: args.browser,
+    userDataDir: args.userDataDir, tab: args.tab, activate: args.activate !== false,
+  };
+  // Connect BEFORE opening the reader. A readline interface starts consuming
+  // immediately, so building it first meant the file drained into a listener
+  // that did not exist yet while we awaited the socket, and every line was lost.
+  const cdp = await CDP.connect(endpoint);
+  const source = args.flags.file ? createReadStream(args.flags.file) : process.stdin;
+  const rl = readline.createInterface({ input: source, crlfDelay: Infinity });
+  const gap = args.flags.gap ?? 250;
+  let i = -1, worst = 0, lastInput = false;
+
+  try {
+    for await (const raw of rl) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      i++;
+      let out;
+      try {
+        const argv = lineToArgv(line);
+        // Parse exactly as main() does, so a batch line behaves identically to
+        // the same words typed on the command line.
+        const la = parseArgs(argv);
+        const [cmd, ...rest] = la._;
+        // Connection belongs to the batch, never to a line: reusing one socket
+        // is the whole point, and a per-line endpoint would defeat it.
+        la.session = args.session; la.cdp = args.cdp; la.browser = args.browser;
+        la.userDataDir = args.userDataDir; la.tab = args.tab; la.activate = args.activate;
+        if (!argv.includes('--speed')) la.speed = args.speed;
+        la.json = true;
+
+        if (!NEEDS_BROWSER.has(cmd)) {
+          throw Object.assign(new Error(`"${cmd}" is not a batch command`), { code: 'EUSAGE' });
+        }
+        // Pace between inputs. Separate processes used to leave a natural gap;
+        // batching removes it, and a burst of clicks with no pause is exactly
+        // the signal this tool exists to avoid. Reads are exempt.
+        const isInput = !READ_ONLY.has(cmd);
+        if (isInput && lastInput && gap > 0) await sleep(lognormal(gap, 0.28, gap * 3));
+        lastInput = isInput;
+
+        const r = await run(la, cmd, rest, cdp);
+        out = { i, ok: true, command: cmd, ...r.data };
+      } catch (e) {
+        out = { i, ok: false, command: line.slice(0, 40), error: e.message, code: e.code ?? 'EFAIL' };
+        worst = Math.max(worst, EXIT[e.code] ?? 1);
+        if (args.flags.stopOnError) { process.stdout.write(JSON.stringify(out) + '\n'); break; }
+      }
+      process.stdout.write(JSON.stringify(out) + '\n');
+    }
+  } finally {
     await cdp.drain();
     cdp.close();
+    rl.close();
   }
+  process.exitCode = worst;
 }
 
 async function main() {
@@ -376,6 +505,8 @@ async function main() {
     if (args.json) return console.log(JSON.stringify(p ?? null));
     return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
   }
+
+  if (cmd === 'run') return runBatch(args);
 
   if (cmd === 'browsers') {
     const rows = await survey();

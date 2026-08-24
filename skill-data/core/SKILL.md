@@ -71,17 +71,80 @@ Running `agent-hands` against a throwaway session buys nothing. There is no
 account to lose and no reputation to protect. Use `agent-browser click` there;
 it is faster.
 
+## Batch: many commands, one connection
+
+Every one-shot command pays a Node start plus a connect. Measured on this
+machine: ~370 ms of process boot and ~130 ms of connect, for a command whose
+real work is a few milliseconds. Eight commands cost 3.1 s one at a time and
+451 ms batched — the same work, 6.9x faster.
+
+**Use `run` for anything more than two or three steps.**
+
+```bash
+printf '%s\n' \
+  'open https://example.com' \
+  'snapshot' \
+  'text h1' \
+  | agent-hands run --browser edge
+```
+
+A batch line is just command-line arguments. There is no second syntax: every
+verb, flag and default behaves exactly as it does one-shot, and any verb added
+later works here with no extra wiring. JSON lines are accepted for generated
+input:
+
+```
+{"cmd":"click","ref":"@e17"}
+{"cmd":"fill","args":["#q","hello"]}
+```
+
+Results stream back as NDJSON, one object per line, in order, each shaped like
+the `--json` output you already know plus an `i` index:
+
+```json
+{"i":0,"ok":true,"command":"text","selector":"h1","chars":92,"text":"..."}
+{"i":1,"ok":false,"command":"click --ref @e9","error":"unknown ref","code":"EUSAGE"}
+```
+
+Blank lines and `#` comments are skipped and do not consume an index. One
+failing line does not stop the run — it reports `ok:false` and the batch
+continues, so a 40-step sweep does not die on step 3. Pass `--stop-on-error` if
+you want the opposite. The exit code is the worst line's, using the same codes
+as the CLI: 2 usage, 3 challenge unresolved.
+
+### Pacing still applies, and that matters
+
+Separate processes used to leave a natural gap between actions. Batching
+removes it, and a burst of clicks with no pause is exactly the signal this tool
+exists to avoid. So a lognormal pause is inserted between **input** commands
+(`--gap <ms>`, default 250, `0` disables).
+
+Read-only commands — `text`, `snapshot`, `doctor`, `challenge`, `where` — emit
+no input event, so nothing can observe their timing and they are never paced.
+That is why a batch of reads runs at full speed while a batch of clicks does
+not.
+
+### When not to batch
+
+One connection means one tab. If the work needs to move between tabs, run a
+batch per tab. And if a step's input depends on reading the result of the
+previous step, you cannot pre-write the lines — do those interactively, then
+batch the deterministic run once you know the shape.
+
 ## When to use which tool
 
 | Task | Tool |
 |---|---|
-| Open a URL, read text, snapshot, cookies, tabs | `agent-browser` |
+| Open a URL, read text, snapshot, cookies, tabs (pooled session) | `agent-browser` |
+| Open a URL, read text, snapshot (browser YOU launched) | `agent-hands` |
 | Click, type, fill, press a key, scroll on a credentialed site | `agent-hands` |
 | Click on a throwaway session | `agent-browser` |
 | Click a NATIVE OS dialog the page cannot reach | `agent-win` |
 
 Both drive the same browser at the same time. No handoff, no conflict.
-`agent-hands` has no `open`; navigation always stays with `agent-browser`.
+`agent-hands` has its own `open`, `text` and `snapshot` since 0.6.0, because
+`agent-browser` cannot attach to a browser you launched yourself. On a pooled
+session either tool works; on an external browser, use `agent-hands`.
 
 `agent-win` is the OS lane, not a browser tool. Its only browser job is clicking
 native dialogs that live in the window chrome, where CDP is blind — the
