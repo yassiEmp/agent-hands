@@ -25,7 +25,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { readPortFile } from './cdp.mjs';
 
 const EXES = {
@@ -89,6 +89,10 @@ export async function launch({ url, browser = 'edge', profile, port = 0, waitMs 
   ];
   if (url) args.push(url);
 
+  // Anything holding this profile from BEFORE we spawned is a real orphan.
+  // Anything after is a child of this very attempt, and naming those sends the
+  // caller round a loop that never converges.
+  const startedAt = Date.now();
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
   child.unref();
   log(`launching ${browser} on ${dir}`);
@@ -99,7 +103,55 @@ export async function launch({ url, browser = 'edge', profile, port = 0, waitMs 
     const found = readPortFile(dir);
     if (found?.port) return { browser, exe, profile: dir, port: found.port, url: url || null, pid: child.pid };
   }
-  throw Object.assign(new Error(
-    `${browser} did not write DevToolsActivePort within ${Math.round(waitMs / 1000)}s.\n` +
-    `  looked in: ${dir}`), { code: 'EFAIL' });
+  // Naming the directory it looked in is not a fix. The usual cause is an
+  // orphan process still holding this profile: a browser that crashed or was
+  // force-killed leaves children behind, the new window is handed to them, and
+  // no debugging port is ever opened. Say that, and name the pids.
+  const holders = profileHolders(dir, startedAt);
+  const lines = [
+    `${browser} did not write DevToolsActivePort within ${Math.round(waitMs / 1000)}s.`,
+    `  looked in: ${dir}`,
+  ];
+  if (holders.length) {
+    lines.push(
+      `  ${holders.length} process(es) still hold this profile with no debugging port:`,
+      `    pid ${holders.join(', ')}`,
+      '  A crashed or force-killed browser leaves these behind, and the new window',
+      '  is handed to them so no port opens. Close them:',
+      `    powershell -NoProfile -Command \"Stop-Process -Id ${holders.join(',')} -Force\"`,
+      '  If a retry then fails the same way, the profile itself is damaged - each',
+      '  attempt leaves a new orphan. Use another profile:',
+      '    agent-hands launch <url> --profile <name>');
+  } else {
+    lines.push('  Nothing was holding this profile beforehand, so the browser started',
+      '  and never opened the port. That is usually a damaged profile: a force-kill',
+      '  can leave one in a state where every later launch is handed off and dies.',
+      '  A different profile is the fast way past it:',
+      '    agent-hands launch <url> --profile <name>',
+      '  To reuse this one, close every process on it and move it aside:',
+      `    powershell -NoProfile -Command \"Move-Item '${dir}' '${dir}.broken'\"`);
+  }
+  throw Object.assign(new Error(lines.join(String.fromCharCode(10))), { code: 'EFAIL' });
+}
+
+// Which processes still hold this user-data-dir? Only called on the failure
+// path, so the ~800ms WMI cost does not matter. The path goes through the
+// environment, not the script text, so a profile name with a space or a quote
+// cannot break the query. Windows only; elsewhere the caller falls back to the
+// generic message.
+// Matched as the whole flag plus the whole path, then a delimiter. A bare
+// substring test would match a sibling profile whose name merely starts the
+// same way, and the message this feeds tells the caller to Stop-Process.
+const HOLDERS_PS = "$d = \"--user-data-dir=\" + $env:AH_PROFILE_DIR.ToLower(); $sp = $d + [string][char]32; $cut = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$env:AH_SINCE_MS).LocalDateTime; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CreationDate -lt $cut } | ForEach-Object { $c = $_.CommandLine.ToLower().Replace([string][char]34, ''); if ($c.Contains($sp) -or $c.EndsWith($d)) { $_.ProcessId } }";
+
+function profileHolders(dir, since) {
+  if (process.platform !== 'win32') return [];
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-Command', HOLDERS_PS], {
+      encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, AH_PROFILE_DIR: dir, AH_SINCE_MS: String(since) },
+    });
+    return out.split(new RegExp("\\r?\\n"))
+      .map(l => l.trim()).filter(l => /^[0-9]+$/.test(l));
+  } catch { return []; }
 }

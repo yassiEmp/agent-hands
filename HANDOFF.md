@@ -97,6 +97,21 @@ npm has 0.15.0. 0.15.1 is committed and not yet published.
 
 ## Fixed in 0.15.1 (24 Aug 2026) — reported from a real failed login
 
+Also in 0.15.1: `launch` failures now name a cause. The old message gave the
+directory it looked in and nothing else. It now lists the processes that held
+that profile BEFORE the spawn — anything created after is a child of the
+failing attempt, and naming those sends the caller round a loop that never
+converges. Measured on a profile damaged by a force-kill: every attempt leaves
+exactly one orphan, so the message names both remedies and terminates.
+
+Near-miss worth keeping: the first version of that process query matched on
+the substring `agent-hands-profiles*default`, which also matches a sibling
+profile because Chromium appends `--profile-directory=Default`. The message it
+feeds tells the caller to run Stop-Process. It now matches the whole
+`--user-data-dir=<path>` flag followed by a delimiter, with quotes stripped
+first, and that was verified to separate `default`, `rdv` and `qa2`.
+
+
 One bug, two gates, and it is the most expensive one found so far.
 
 A container COVERS its children. Clicking a `<form>` box focuses whichever input
