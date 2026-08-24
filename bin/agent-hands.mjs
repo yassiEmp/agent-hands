@@ -222,15 +222,24 @@ CHALLENGES
     agent-hands open <url> --pause-on-challenge # stop, tell them, resume
   Exit 3 means it was still there when the wait ran out. Nothing was bypassed.
 
-WHEN TO USE THIS  (escalate, do not start here)
-  1. Default — throwaway browser, no profile, no logins:
-       agent-browser --session scratch open <url>
-     Public pages, research, scraping. Most work belongs here.
-  2. Logged-in profile — only when the task needs the user's account:
-       agent-browser --session work ... open <url> --headed
-  3. agent-hands — only when 2 applies AND the site can ban the account,
-     or agent-browser's instant input is being rejected.
-  Using this on a throwaway session buys nothing. There is no account to lose.
+WHICH TOOL
+  agent-browser and agent-hands drive the same browser and do different jobs.
+
+    agent-browser   pooled throwaway sessions it launches and owns, and its own
+                    snapshot/tabs/cookies there. Instant input, which is fine
+                    when there is no account to lose.
+    agent-hands     any browser it can reach, INCLUDING one you launched
+                    yourself or attached to, which agent-browser cannot open at
+                    all. Human-rate input, refs, sign-in guard, pinning.
+
+  Use agent-hands when the browser carries a real account, when the site scores
+  behaviour, or when the browser is not one agent-browser started. On a
+  throwaway session with no login, agent-browser is faster and nothing is at
+  risk either way.
+
+  Earlier versions of this help called agent-hands a last resort behind
+  agent-browser. That stopped being true once it grew launch, open, snapshot
+  and text: it is now a complete loop on its own.
 
 NOTES
   Never moves the physical cursor and never raises the window.

@@ -38,38 +38,23 @@ which is what keeps it quiet.
 
 If a verb you need is missing, say so and stop. Do not route around the CLI.
 
-## Decide before you launch anything
+## Which tool
 
-Three levels. Start at 1. Escalate only when the task forces it.
+`agent-browser` and `agent-hands` drive the same browser and do different jobs.
 
-**1. Throwaway browser — the default for most work.**
+| | |
+|---|---|
+| `agent-browser` | pooled throwaway sessions it launches and owns, plus its own snapshot/tabs/cookies there. Instant input, fine when there is no account to lose. |
+| `agent-hands` | any browser it can reach, **including one you launched or attached to**, which agent-browser cannot open at all. Human-rate input, refs, sign-in guard, pinning. |
 
-```bash
-agent-browser --session scratch open <url>     # no --profile, no logins
-```
+Use `agent-hands` when the browser carries a real account, when the site scores
+behaviour, or when the browser is not one `agent-browser` started. On a
+throwaway session with no login, `agent-browser` is faster and nothing is at
+risk either way.
 
-Public pages, research, scraping, docs, competitor checks, anything read-only.
-Nothing to ban, nothing to leak. Several can run in parallel. Close when done.
-
-**2. The logged-in profile — only when the task needs the user's account.**
-
-```bash
-agent-browser --session work --profile "<profiles>/main" open <url> --headed \
-  --init-script "<profiles>/init-normalize.js"
-```
-
-Dashboards, mail, anything behind a login. This profile carries real cookies.
-A ban here costs the user an account, not a scrape. Do not use it to read a
-public page you could have read at level 1.
-
-**3. agent-hands — only when level 2 applies and the site can punish you.**
-
-Use it when the account is real and the site scores behaviour, or when
-`agent-browser`'s instant input is visibly rejected.
-
-Running `agent-hands` against a throwaway session buys nothing. There is no
-account to lose and no reputation to protect. Use `agent-browser click` there;
-it is faster.
+Earlier guidance called `agent-hands` a last resort behind `agent-browser`.
+That stopped being true once it grew `launch`, `open`, `snapshot` and `text`:
+it is a complete loop on its own now.
 
 ## Signing in
 
@@ -113,8 +98,8 @@ agent-hands snapshot --cdp 9444
 #   @e3 [input type="password"] "Password"
 #   @e5 [button type="submit"] "Log in"
 
-agent-hands login --cdp 9444 --identifier-ref @e2 --password-ref @e3 \
-  --submit-ref @e5 --email-env EMAIL --password-env PASSWORD
+agent-hands login @e2 @e3 @e5        # identifier, password, submit
+# credentials default to $AGENT_HANDS_EMAIL / $AGENT_HANDS_PASSWORD
 ```
 
 `snapshot` prints that command for you whenever it sees a form, with this
@@ -144,6 +129,54 @@ agent-hands login --window "example" --email-env EMAIL --password-env PASSWORD
 This needs Chromium to publish a page accessibility tree
 (`--force-renderer-accessibility`, which `launch` passes). When the tree is
 withheld the command says exactly that rather than blaming your form.
+
+## State: pin the browser once
+
+The commands above all take `--cdp` or `--browser`. You do not have to repeat it.
+
+```bash
+agent-hands browsers        # what is live
+agent-hands use 2           # pin number 2 — ask the user first if unsure
+agent-hands snapshot        # no target flag from here on
+agent-hands use             # what is pinned, and which file holds it
+agent-hands use --clear     # drop it
+```
+
+The pin lives in `./.agent-hands/config.json`, found by walking up from the
+working directory. `--global` writes `~/.agent-hands/config.json`.
+
+**Three rules make this safe to rely on:**
+
+- **An explicit flag always wins.** `--cdp 1234` overrides the pin, always.
+- **A dead pin refuses.** Before each use the pin is verified live. If that
+  browser is gone the command stops and names the fix — it never falls back to
+  whatever else is open, because that silent fallback is the bug pinning exists
+  to remove.
+- **Every result says how it resolved:** `"via":"flag"`, `"pin"` or `"only-one"`.
+  If you are on the wrong browser, that field tells you before the twentieth
+  command does.
+
+**With several browsers live and nothing pinned, commands stop** with a numbered
+list and exit 5. That is not a failure — it is the tool refusing to choose which
+of the user's browsers to drive. Put the question to the user, then `use <n>`.
+
+### Parallel agents
+
+Pins are keyed by project *and* by agent identity, discovered from the
+environment. Measured: **no harness exposes a per-subagent id** — two sibling
+subagents share every environment variable, including the session id and
+messaging token. It is an open request on claude-code #36981 and codex #20852.
+
+So a parent and the subagents it delegates to share one pin, which is right for
+delegation. Subagents that need **different** browsers must each be given one:
+
+```bash
+AGENT_HANDS_ID=sweep-3
+```
+
+The parent handing out browsers is the natural place to set it. Without it,
+whichever sibling pins last wins, and the replaced pin prints a warning saying
+exactly this.
 
 ## Batch: many commands, one connection
 
