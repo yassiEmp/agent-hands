@@ -71,6 +71,76 @@ Running `agent-hands` against a throwaway session buys nothing. There is no
 account to lose and no reputation to protect. Use `agent-browser click` there;
 it is faster.
 
+## Signing in
+
+Sign-in is where a site grades hardest, so the CLI guards it rather than
+trusting you to remember.
+
+Any command that lands on a sign-in page **while the browser is advertising
+automation** disconnects and says so, exit 4:
+
+```
+x this is a sign-in page and the browser is advertising automation
+  navigator.webdriver = true   https://example.com/login
+```
+
+It measures instead of assuming — it reads `navigator.webdriver` on the page in
+front of it. A browser started by `agent-hands launch` reports `false`, so the
+guard never fires and CDP is safe there. `--force` overrides.
+
+Measured, Chrome 151, and worth knowing because it is counter-intuitive:
+
+| how the browser started | navigator.webdriver |
+|---|---|
+| `--remote-debugging-port=9444` (explicit port) | `false` |
+| `--enable-automation` | `true` |
+| `chrome://inspect` toggle (ephemeral port) | `true` |
+| `agent-hands launch` | `false` |
+
+So an open debugging port is not itself the problem. The problem is
+`--enable-automation`, which most automation launchers pass, and the
+`chrome://inspect` route.
+
+### The CLI never guesses which box is which
+
+A form can label its fields anything, in any language. A wrong guess types a
+password into something that is not a password field — the worst failure this
+tool could have. So **you** read the page and name the refs:
+
+```bash
+agent-hands snapshot --cdp 9444
+#   @e2 [input type="email"] "Email address"
+#   @e3 [input type="password"] "Password"
+#   @e5 [button type="submit"] "Log in"
+
+agent-hands login --cdp 9444 --identifier-ref @e2 --password-ref @e3 \
+  --submit-ref @e5 --email-env EMAIL --password-env PASSWORD
+```
+
+`snapshot` prints that command for you whenever it sees a form, with this
+page's refs already in it. Omit `--submit-ref` to fill without submitting.
+
+Credentials never go in argv: a value passed as `--password` lands in shell
+history and in the process list, readable by anything running as you. Use
+`--email-env` / `--password-env`, or `--password-stdin`.
+
+A challenge is detected after filling and before submitting, and handed to you.
+It is never solved programmatically: an invoke leaves no pointer trace, which
+scores worse than not clicking, and the account is what pays.
+
+### The second lane, for a browser you did not launch
+
+If the browser carries the flag and you cannot relaunch it, sign in through the
+OS accessibility layer with nothing attached:
+
+```bash
+agent-hands login --window "example" --email-env EMAIL --password-env PASSWORD
+```
+
+This needs Chromium to publish a page accessibility tree
+(`--force-renderer-accessibility`, which `launch` passes). When the tree is
+withheld the command says exactly that rather than blaming your form.
+
 ## Batch: many commands, one connection
 
 Every one-shot command pays a Node start plus a connect. Measured on this

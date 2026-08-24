@@ -16,6 +16,7 @@ import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
 import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { loginFlow } from '../cli/login.mjs';
+import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -42,7 +43,7 @@ START HERE  (agents: this is the whole loop)
 
 COMMANDS
   launch <url>                start a browser with the right flags, print its port
-  login [--dry-run]           sign in through the OS layer, before CDP attaches
+  login --identifier-ref ...  fill a form with refs YOU chose; see SIGNING IN
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
@@ -125,35 +126,48 @@ BATCH  (use this for anything more than 2-3 steps)
   leave a natural gap; batching removes it, so a small pause is inserted (--gap
   ms, default 250, 0 disables). Reads are exempt - they emit no input event.
 
-SIGNING IN  (UIA before CDP, never the other way round)
-  Attaching CDP sets navigator.webdriver, and a login form is the worst moment
-  to carry it. So authenticate through the OS accessibility layer with nothing
-  attached, and connect CDP only afterwards.
+SIGNING IN
+  Sign-in is where a site grades hardest, so the CLI guards it for you.
 
-    agent-hands launch https://example.com/login --browser edge --profile work
-    agent-hands login --window "example" --email-env EMAIL --password-env PASSWORD
-    agent-hands snapshot --cdp <port>          # now attach, and carry on
+  Any command that lands on a sign-in page while the browser is advertising
+  automation DISCONNECTS and tells you, instead of working there:
 
-  launch passes the flags that matter: --force-renderer-accessibility (without
-  it Chromium builds no page tree and the OS lane sees only toolbar),
-  --disable-blink-features=AutomationControlled (removes navigator.webdriver at
-  the source), a dedicated profile, and the URL as an argument rather than a
-  later navigation.
+    $ agent-hands text body --cdp 9555
+    x this is a sign-in page and the browser is advertising automation
+      navigator.webdriver = true   file:///.../login.html
+      Pick one: relaunch clean, use the OS lane, or --force
 
-  login reads any standard form: an identifier field, a password field, an
-  optional "remember me", one submit button, matched by role then by name across
-  languages. Two-step forms that ask for the identifier first are handled. If it
-  is already signed in it says so and does nothing.
+  It measures rather than assumes: it reads navigator.webdriver on the page in
+  front of it. A browser started by "agent-hands launch" reports false, so the
+  guard never fires and CDP is safe there. Exit 4. --force overrides.
+
+  THE CLI NEVER GUESSES WHICH BOX IS WHICH. A form can label its fields anything
+  in any language, and a wrong guess types a password into something that is not
+  a password field. So YOU read the page and name the refs:
+
+    agent-hands snapshot --cdp 9444
+      @e2 [input type="email"] "Email address"
+      @e3 [input type="password"] "Password"
+      @e5 [button type="submit"] "Log in"
+
+    agent-hands login --cdp 9444 --identifier-ref @e2 --password-ref @e3 \
+      --submit-ref @e5 --email-env EMAIL --password-env PASSWORD
+
+  snapshot prints that exact command for you when it sees a form, with this
+  page's refs already filled in.
 
   CREDENTIALS NEVER GO IN ARGV. A value passed as --password lands in shell
   history and in the process list, readable by anything running as you.
-    --email-env NAME --password-env NAME      read from the environment
-    --password-stdin                          read one line from stdin
-  --dry-run reports the form it found and types nothing.
+    --email-env NAME --password-env NAME     read from the environment
+    --password-stdin                         read one line from stdin
+  Omit --submit-ref to fill without submitting. A challenge is detected before
+  submit and handed to you, never solved.
 
-  A challenge (Turnstile, hCaptcha) is detected and handed to you, never solved:
-  a programmatic click leaves no pointer trace, which scores worse than not
-  clicking, and the account is what pays. Exit 3 if it is still there.
+  When the browser is one you did NOT launch and it carries the flag anyway,
+  there is a second lane: "agent-hands login --window <title>" drives the OS
+  accessibility layer with nothing attached. It needs Chromium to publish a page
+  tree (--force-renderer-accessibility, which launch passes); it says so plainly
+  when the tree is withheld.
 
 CHALLENGES
   A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
@@ -233,6 +247,12 @@ function parseArgs(argv) {
     else if (a === '--port') out.flags.port = Number(argv[++i]) || 0;
     else if (a === '--no-remember') out.flags.noRemember = true;
     else if (a === '--dry-run') out.flags.dryRun = true;
+    else if (a === '--force') out.flags.force = true;
+    else if (a === '--identifier-ref') out.flags.identifierRef = argv[++i];
+    else if (a === '--password-ref') out.flags.passwordRef = argv[++i];
+    else if (a === '--submit-ref') out.flags.submitRef = argv[++i];
+    else if (a === '--remember-ref') out.flags.rememberRef = argv[++i];
+    else if (a === '--no-hints') out.flags.noHints = true;
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
@@ -240,6 +260,9 @@ function parseArgs(argv) {
 }
 
 const CHALLENGE_WAIT_DEFAULT = 180000;
+// doctor is a diagnostic and must still answer on a login page; challenge is
+// how you inspect one safely; login never attaches in the first place.
+const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
 const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge']);
 
@@ -280,6 +303,17 @@ async function run(args, cmd, rest, shared) {
   }
 
   const cdp = shared ?? await CDP.connect(endpoint);
+  // Sign-in guard. Runs once per connection, after attach and before the verb,
+  // so a command that lands on a login page disconnects instead of working
+  // there. `login` never attaches, `doctor` is diagnostic, and --force opts out.
+  if (!shared && !args.flags.force && !GUARD_EXEMPT.has(cmd)) {
+    const v = verdict(await inspectPage(cdp));
+    if (v.block) {
+      await cdp.drain(); cdp.close();
+      throw Object.assign(new Error(explainGuard(v)), { code: 'ELOGINPAGE' });
+    }
+  }
+
   try {
     const hasXY = Number.isFinite(args.flags.x);
     // A ref belongs to the browser it was captured from. Passing `session` here
@@ -403,6 +437,8 @@ async function run(args, cmd, rest, shared) {
           x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.w), h: Math.round(e.h),
           off: e.off, disabled: e.disabled,
         }));
+        const lh = loginHint(snap);
+        if (lh) hint(args, lh);
         return {
           data: { url: snap.url, title: snap.title, count: refs.length,
                   truncated: snap.truncated, refs },
@@ -484,6 +520,112 @@ async function readStdinSecret() {
   const chunks = [];
   for await (const c of process.stdin) chunks.push(c);
   return Buffer.concat(chunks).toString('utf8').split('\n')[0].trim();
+}
+
+// Sign in over CDP using refs the AGENT chose.
+//
+// No heuristic decides which box is which. A form can label its fields anything,
+// in any language, and guessing wrong means typing a password into a field that
+// is not one — the worst failure this tool could have. So the agent snapshots,
+// reads the tree, and names the refs. The CLI does the typing at human rate and
+// keeps the secret out of argv, logs and output.
+//
+// This lane needs the browser to be clean: the sign-in guard refuses to run here
+// while navigator.webdriver is true, which is exactly when it would cost you.
+async function loginViaCdp(args, cdp, speed) {
+  const need = (flag, name) => {
+    const v = args.flags[flag];
+    if (!v) throw Object.assign(new Error(
+      `--${name} is required for a ref login.\n` +
+      `  agent-hands snapshot            # read the page, pick the refs\n` +
+      `  agent-hands login --identifier-ref @e5 --password-ref @e7 --submit-ref @e9 \\n` +
+      `    --email-env EMAIL --password-env PASSWORD`), { code: 'EUSAGE' });
+    return v;
+  };
+  const idRef = need('identifierRef', 'identifier-ref');
+  const pwRef = need('passwordRef', 'password-ref');
+  const email = readSecret(args, 'email');
+  const password = args.flags.passwordStdin ? await readStdinSecret() : readSecret(args, 'password');
+  if (!email || !password) {
+    throw Object.assign(new Error([
+      'login needs an identifier and a password.',
+      '  safest:  --email-env EMAIL --password-env PASSWORD',
+      '  or:      echo "$PW" | agent-hands login ... --password-stdin',
+    ].join('\n')), { code: 'EUSAGE' });
+  }
+
+  const put = async (ref, value) => {
+    const box = await locate(cdp, cdp.key, ref, { speed });
+    await clickAt(cdp, args.session, box, box.w, speed);
+    await sleep(lognormal(180, 0.4, 500));
+    await selectAll(cdp);
+    await typeText(cdp, value, speed);
+    return box;
+  };
+
+  await put(idRef, email);
+  await sleep(lognormal(320, 0.35, 900));
+  await put(pwRef, password);
+
+  if (args.flags.rememberRef) {
+    const box = await locate(cdp, cdp.key, args.flags.rememberRef, { speed });
+    await clickAt(cdp, args.session, box, box.w, speed);
+  }
+
+  // Checked after filling and before submitting, because a risk-adaptive widget
+  // decides to appear exactly then. Never solved here.
+  const v = verdict(await inspectPage(cdp));
+  const ch = await checkChallenge(cdp);
+  if (ch.challenged) {
+    return { state: 'challenge', challenge: ch.blocking.map(b => b.vendor),
+             human: renderChallenge(ch) + '\n\n  Filled but NOT submitted. Solve it, then re-run with --submit-only.' };
+  }
+
+  if (args.flags.submitRef) {
+    await sleep(lognormal(400, 0.35, 1200));
+    const box = await locate(cdp, cdp.key, args.flags.submitRef, { speed });
+    await clickAt(cdp, args.session, box, box.w, speed);
+    return { state: 'submitted', webdriver: v.webdriver === true };
+  }
+  return { state: 'filled', note: 'no --submit-ref given; nothing was submitted' };
+}
+
+
+// Hints: teach at the moment of use, not in a manual nobody opens.
+//
+// They go to stderr so --json stdout stays a single parseable object, and they
+// carry the REAL refs from the page in front of you rather than placeholders,
+// so the suggested command can be run exactly as printed.
+function hint(args, lines) {
+  if (args.flags.noHints || args.quiet) return;
+  const body = Array.isArray(lines) ? lines : [lines];
+  console.error(body.map(l => '  ' + l).join('\n'));
+}
+
+// A form is the one place a wrong guess is expensive, so when one is on screen
+// the hint spells out the exact command with this page's refs already in it.
+function loginHint(snap) {
+  const refs = Object.entries(snap.refs);
+  const pw = refs.find(([, e]) => e.type === 'password')?.[0];
+  if (!pw) return null;
+  // Only real fields. A <form> carries the concatenated text of everything
+  // inside it, so matching on name alone proposes the form as the input box.
+  const fields = refs.filter(([, e]) => /^(input|textarea|select)$/.test(e.tag) && e.type !== 'password');
+  const id = fields.find(([, e]) => /email|user|login|identifiant|utilisateur/i
+        .test(`${e.type || ''} ${e.name || ''} ${e.placeholder || ''}`))?.[0]
+    || fields.find(([, e]) => e.type !== 'checkbox' && e.type !== 'submit')?.[0];
+  const submit = refs.find(([, e]) => e.type === 'submit' || e.tag === 'button')?.[0];
+  const remember = refs.find(([, e]) => e.type === 'checkbox')?.[0];
+  const cmd = `  agent-hands login --identifier-ref @${id ?? 'eN'} --password-ref @${pw}`
+    + (remember ? ` --remember-ref @${remember}` : '')
+    + (submit ? ` --submit-ref @${submit}` : '')
+    + ' --email-env EMAIL --password-env PASSWORD';
+  return [
+    'this page has a sign-in form. To fill it without guessing:',
+    cmd,
+    'You choose the refs; the CLI types at human rate and keeps the secret out',
+    'of argv, output and logs. Omit --submit-ref to fill without submitting.',
+  ];
 }
 
 async function runBatch(args) {
@@ -593,6 +735,26 @@ async function main() {
       `          agent-hands login --cdp ${r.port} --email-env EMAIL --password-env PASSWORD`);
   }
 
+  if (cmd === 'login' && (args.flags.identifierRef || args.flags.passwordRef)) {
+    const endpoint = {
+      session: args.session, cdp: args.cdp, browser: args.browser,
+      userDataDir: args.userDataDir, tab: args.tab, activate: args.activate !== false,
+    };
+    const cdp = await CDP.connect(endpoint);
+    try {
+      if (!args.flags.force) {
+        const g = verdict(await inspectPage(cdp));
+        if (g.block) throw Object.assign(new Error(explainGuard(g)), { code: 'ELOGINPAGE' });
+      }
+      const r = await loginViaCdp(args, cdp, args.speed);
+      if (r.state === 'challenge') process.exitCode = 3;
+      if (args.json) return console.log(JSON.stringify({ ok: r.state !== 'challenge', command: 'login', ...r }));
+      return console.log(r.human ?? `✓ ${r.state}`);
+    } finally {
+      await cdp.drain(); cdp.close();
+    }
+  }
+
   if (cmd === 'login') {
     const email = readSecret(args, 'email');
     const password = args.flags.passwordStdin ? await readStdinSecret() : readSecret(args, 'password');
@@ -669,7 +831,7 @@ async function main() {
 
 // 3 is its own code so a caller can tell "a human needs to click something"
 // apart from a real failure, and retry instead of giving up.
-const EXIT = { EUSAGE: 2, ECHALLENGE: 3 };
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4 };
 
 main().catch(err => {
   if (process.argv.includes('--json')) {
