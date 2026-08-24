@@ -225,7 +225,7 @@ export function resolveRef(session, ref) {
   } catch (e) {
     const err = new Error(
       `could not read box for ${ref}. Refs go stale on every page change.\n` +
-      `  fix: agent-browser --session ${session} snapshot -i    then use the new ref.`
+      `  fix: agent-hands snapshot    then use the new ref.`
     );
     err.code = 'ENOTFOUND';
     throw err;
@@ -263,7 +263,7 @@ export async function resolveTarget(cdp, { selector, text }) {
     const what = text ? `text "${text}"` : `selector "${selector}"`;
     const err = new Error(
       `no element matched ${what}.\n` +
-      `  hint: run \`agent-browser --session <s> snapshot -i\` to see what is on the page.`
+      `  hint: run \`agent-hands snapshot\` to see what is on the page.`
     );
     err.code = 'ENOTFOUND';
     throw err;

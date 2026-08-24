@@ -28,8 +28,11 @@ browser costs three things at once:
   so a second connection re-prompts the user, and on a browser holding their
   live session that prompt is the only thing standing between an agent and
   their accounts.
-- **It leaves no trace.** `agent-hands audit` records every authorisation and
-  every client. A raw socket appears there as an absence.
+- **It leaves no trace.** `agent-hands audit` records every authorisation the
+  relay grants and every client that used it, so a raw socket on a `--browser`
+  target shows up there as an absence. That covers the relayed lane only: a
+  `--cdp` port and a pooled `--session` need no approval, so nothing authorises
+  and nothing is logged. `agent-hands audit` tells you which lane you are on.
 
 Measured against `bot-detector.rebrowser.net`: a snapshot, a scroll and a mouse
 move through this CLI triggered **no** detection — no `Runtime.enable` leak, no

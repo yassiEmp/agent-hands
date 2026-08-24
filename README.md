@@ -7,10 +7,10 @@ Fitts-law motion with Bezier paths and lognormal keystroke timing.
 It never moves your physical cursor and never raises the window.
 
 ```bash
-agent-browser --session work snapshot -i     # find the element
+agent-hands snapshot                         # find the element, get @e1 @e2
 agent-hands fill "#searchbox_input" "auto ecole vincennes"
 agent-hands press Enter
-agent-browser --session work get url         # verify
+agent-hands text h1                          # verify
 ```
 
 ## Why
@@ -62,7 +62,7 @@ press Enter --times n     scroll 600                 where
 doctor                    skills get core [--full]
 ```
 
-`--ref` takes a ref from `agent-browser snapshot -i`. It is the most robust
+`--ref` takes a ref from `agent-hands snapshot`. It is the most robust
 target and the only one that reaches inside a cross-origin iframe.
 `fill` replaces the field's contents. Set `AGENT_HANDS_SESSION` to skip
 `--session` on every call.
@@ -159,8 +159,9 @@ after. `Page.setWebLifecycleState` does not thaw a frozen tab and
 `Emulation.setFocusEmulationEnabled` hangs on one, so activation is the only
 route. `--no-activate` turns that flicker into an error instead.
 
-`--ref` needs refs from `agent-browser snapshot -i`, which only exist for a
-pooled session. With `--browser` or `--cdp`, target by selector or `--text`.
+`--ref` needs refs from `agent-hands snapshot`, which mints and stores its own
+per browser. They work on `--browser` and `--cdp` targets too, and they are the
+only target that reaches inside a cross-origin iframe.
 
 Set `AGENT_HANDS_CDP` to skip `--cdp` on every call.
 

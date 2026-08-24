@@ -69,7 +69,7 @@ COMMANDS
   where                       print last cursor position
   doctor                      check the session is reachable
   update [--yes]              report a newer version; --yes applies it
-  audit [--times <n>]         who authorised and drove this browser, and when
+  audit [--times <n>]         who authorised and drove this browser (--browser only)
   skills list                 list bundled docs
   skills get core [--full]    print the agent guide
 
@@ -244,8 +244,8 @@ WHICH TOOL
 NOTES
   Never moves the physical cursor and never raises the window.
   Prefer a CSS selector; --text is ranked but a page with several matching
-  controls can still resolve the wrong one. Get selectors from
-  \`agent-browser --session <s> snapshot -i\`.
+  controls can still resolve the wrong one. Get selectors and refs from
+  \`agent-hands snapshot\`, which sees every browser this CLI can reach.
   Submit forms with \`press Enter\` rather than hunting for a submit button.
   Inside an iframe, --text and CSS selectors fail: page JS cannot cross the
   boundary. Use --ref from \`agent-hands snapshot\`, which works on any browser
@@ -257,7 +257,7 @@ NOTES
 
 EXAMPLES
   export AGENT_HANDS_SESSION=work        # then omit --session everywhere
-  agent-browser --session work snapshot -i
+  agent-hands snapshot
   agent-hands fill --ref @e63 "Auto-école Smoni"    # replaces existing text
   agent-hands click --ref @e64                      # re-resolves at click time
   agent-hands press Backspace --times 20
@@ -375,6 +375,11 @@ const endpoint = { ...resolution.endpoint,
 
   try {
     const hasXY = Number.isFinite(args.flags.x);
+    // A missing argument used to sail through as an empty string. `fill "#pw"`
+    // with the value forgotten reported ok and typed nothing; `scroll $N` with N
+    // unset reported ok and did not move. Success on a no-op is the worst answer
+    // available, because the caller then acts on a page it never changed.
+    requireArgs(cmd, rest, args, hasXY);
     // A ref belongs to the browser it was captured from. Passing `session` here
     // sent every external-browser lookup to the pool, because session defaults
     // to "work" even when --browser points elsewhere.
@@ -413,6 +418,11 @@ const endpoint = { ...resolution.endpoint,
         else await pressKey(cdp, 'End', speed);
         // With --ref or --xy there is no selector positional, so the text is first.
         const text = (args.flags.ref || hasXY ? rest[0] : rest[1]) ?? '';
+        // selectAll only highlights. Typing over the selection replaces it, but
+        // typing nothing leaves it highlighted and the old value in place — so
+        // `fill "#x" ""`, the documented way to clear a field, reported
+        // replaced:true and changed nothing. Delete the selection explicitly.
+        if (replaced && text === '') await pressKey(cdp, 'Delete', speed);
         const t = await typeText(cdp, text, speed);
         return {
           data: { ...t, tag: target.tag, replaced },
@@ -499,8 +509,11 @@ const endpoint = { ...resolution.endpoint,
         const lh = loginHint(snap);
         if (lh) hint(args, lh);
         return {
+          // The hint goes to stderr for a human. An agent reads --json and saw
+          // nothing, so it learned neither that this is a sign-in form nor the
+          // refs to fill it with. Same signal, both modes.
           data: { url: snap.url, title: snap.title, count: refs.length,
-                  truncated: snap.truncated, refs },
+                  truncated: snap.truncated, refs, signin: lh ?? null },
           human: render(snap),
         };
       }
@@ -706,6 +719,39 @@ async function loginViaCdp(args, cdp, speed, rest) {
 // They go to stderr so --json stdout stays a single parseable object, and they
 // carry the REAL refs from the page in front of you rather than placeholders,
 // so the suggested command can be run exactly as printed.
+// Refuse a command that cannot do anything, instead of reporting it did.
+// Every message names the fix, because the caller is usually a script that
+// interpolated an empty variable and cannot see the page.
+function requireArgs(cmd, rest, args, hasXY) {
+  const NL = String.fromCharCode(10);
+  const bad = m => { throw Object.assign(new Error(m), { code: 'EUSAGE' }); };
+  const withRef = args.flags.ref || hasXY;
+
+  if (NEEDS_TARGET.has(cmd) && !withRef && !args.flags.text && !rest[0]) {
+    bad(cmd + ' needs a target. One of:' + NL
+      + '  ' + cmd + ' "#css-selector"      a CSS selector' + NL
+      + '  ' + cmd + ' --ref @e12           a ref from: agent-hands snapshot' + NL
+      + '  ' + cmd + ' --text "Label"       visible text' + NL
+      + '  ' + cmd + ' --xy 420 300         raw viewport coordinates');
+  }
+  // An explicit "" is the documented way to clear a field and stays legal.
+  // A missing positional is a typo, and typing nothing is never what it meant.
+  if (cmd === 'fill' && (withRef ? rest[0] : rest[1]) === undefined) {
+    bad('fill needs the text to type, after the target.' + NL
+      + '  fill "#email" "you@example.com"   |   fill --ref @e2 "you@example.com"' + NL
+      + '  Pass "" to clear the field on purpose.');
+  }
+  if (cmd === 'type' && rest[0] === undefined) {
+    bad('type needs the text to type.  type "hello"');
+  }
+  if (cmd === 'press' && !rest[0]) {
+    bad('press needs a key. known: ' + Object.keys(KEYS).join(', '));
+  }
+  if (cmd === 'scroll' && rest[0] !== undefined && !Number.isFinite(Number(rest[0]))) {
+    bad('scroll needs a number of pixels, got "' + rest[0] + '". Negative scrolls up.');
+  }
+}
+
 function hint(args, lines) {
   if (args.flags.noHints || args.quiet) return;
   const body = Array.isArray(lines) ? lines : [lines];
@@ -1049,7 +1095,20 @@ async function main() {
     });
     const rows = tail(`ws://127.0.0.1:${port}${browserPath ?? ''}`, args.flags.times ?? 50);
     if (args.json) return console.log(JSON.stringify({ ok: true, command: 'audit', events: rows }));
-    if (!rows.length) return console.log('no audit events for this browser yet.');
+    if (!rows.length) {
+      // "no events yet" reads as "nothing happened". Only the relay can authorise
+      // a browser, so only the relay writes here. A --cdp browser is not
+      // under-reported, it is out of scope, and saying so stops an agent reading
+      // an empty log as proof that nothing drove the browser.
+      const NL = String.fromCharCode(10);
+      const relayed = Boolean(args.browser || args.userDataDir);
+      return console.log(relayed
+        ? 'no audit events for this browser yet.'
+        : 'no audit events, and none were expected for this target.' + NL
+          + '  Only connections through the approval relay are audited: --browser <name>' + NL
+          + '  and --user-data-dir <path>. A --cdp port or a pooled --session needs no' + NL
+          + '  approval, so nothing authorises and nothing is logged.');
+    }
     return console.log(rows.map(r =>
       `${r.t}  ${r.ev.padEnd(15)} ${r.cmd ?? r.msg ?? r.err ?? (r.pid ? `pid ${r.pid}` : '')}`).join('\n'));
   }

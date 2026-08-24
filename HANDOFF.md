@@ -5,7 +5,7 @@ Written 16 Aug 2026. Read this before changing anything.
 ## What it is now
 
 A CLI that drives a real Chromium browser with human-rate input, over CDP, with
-its own page reading. `0.4.2 -> 0.14.0` in one session.
+its own page reading. `0.4.2 -> 0.15.0`.
 
     agent-hands browsers        what is live
     agent-hands use 2           pin one; later commands need no target flag
@@ -64,6 +64,16 @@ npm has 0.7.0. Publishing is only needed to share with another machine.
   different browsers must each be given `AGENT_HANDS_ID`.
 - A WMI process-tree lookup costs ~822ms against a ~250ms command, so identity
   cannot be derived from the process tree.
+- **The sign-in guard measures a value this tool masks.** On connect the CLI
+  installs the `navigator.webdriver = false` shim, and it survives in every
+  document created while attached. So one `--force` attach plus a navigation
+  disarms the guard for the rest of that browser run, including for a later
+  command that passed no `--force`. Measured 24 Aug 2026: exit 4 on a fresh
+  `--enable-automation` browser, silent on the same browser after one forced
+  navigation. The shim does lower what the site reads, so the guard is not
+  simply wrong. But `--force` is documented per-command and behaves as sticky,
+  and the two cases cannot be told apart from the page: a clean browser
+  started by `launch` carries the same shim.
 
 ## Known open, in priority order
 
@@ -80,6 +90,44 @@ npm has 0.7.0. Publishing is only needed to share with another machine.
    The real fix is parallel walking inside agent-win, a different repo.
 4. `agent-browser --init-script` is silently ignored on this machine — verified
    by `Screen.prototype` being unpatched. Upstream, third-party binary.
+5. `browsers` prints "Use this one" for the user's own Edge when it is the only
+   reachable target. That browser holds their live logins, and the line reads
+   as a recommendation rather than a question. The core skill says ask first;
+   the CLI output does not.
+
+## Fixed in 0.15.0 (24 Aug 2026), all found by walking the CLI
+
+Seven, in the order they bite:
+
+1. `fill <target> ""` reported `replaced:true` and left the old value.
+   `selectAll` only highlights; typing nothing leaves the selection highlighted
+   and the field unchanged. The documented way to clear a field did not clear
+   it. Now presses Delete when the replacement is empty.
+2. A missing argument reported success on a no-op: `fill "#x"` with the value
+   forgotten, `type` with nothing, `scroll abc` (`pixels:null`), `press` with no
+   key, and `move`/`click`/`hover`/`fill` with no target — the last resolving
+   the string "undefined" as a selector. All exit 2 now and name the four ways
+   to target. This is the one that matters for scripts: a shell that
+   interpolated an empty variable got a green result and an unchanged page.
+3. Runtime hints pointed at `agent-browser --session <s> snapshot -i` — a tool that
+   cannot attach to an external browser, with `<s>` never substituted. Following
+   the hint failed twice over. Now `agent-hands snapshot`.
+4. `audit` said "no audit events for this browser yet" for a `--cdp` target that
+   is never audited. That reads as "nothing happened" when it means "out of
+   scope", and an empty log is exactly what an agent would cite as proof.
+   Now it names the audited lane and why this one is not in it.
+5. `snapshot --json` dropped the sign-in hint that human mode prints on stderr.
+   The `--json` caller the CLI tells agents to be learned neither that the page
+   held a sign-in form nor the refs to fill it. Now a `signin` field.
+6. `skills/agent-hands/SKILL.md`, the discovery stub read before anything else,
+   still called the tool a last resort behind `agent-browser` and said
+   agent-browser navigates and reads. The core skill it points at says the
+   opposite. An agent following the stub reaches for a tool that cannot attach
+   to the user's browser, hits a wall, and writes raw CDP — the exact failure
+   this CLI exists to prevent.
+7. README said refs "only exist for a pooled session. With --browser or --cdp,
+   target by selector or --text." False since 0.6.0, and it talks an agent out
+   of the only target that reaches inside an iframe.
 
 ## How to work on it
 
