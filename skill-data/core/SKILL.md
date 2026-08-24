@@ -106,7 +106,18 @@ agent-hands login @e2 @e3 @e5        # identifier, password, submit
 ```
 
 `snapshot` prints that command for you whenever it sees a form, with this
-page's refs already in it. Omit `--submit-ref` to fill without submitting.
+page's refs already in it. Omit the last ref to fill without submitting.
+
+**Every ref you name is checked against the snapshot before a key is typed,
+and a check that cannot run is a refusal.** Exit 2 and nothing typed, for: a
+password ref that is not `type="password"`, an identifier ref that is a password
+or holds no text, a submit ref that is not a button, a remember ref that is not
+a checkbox, a ref missing from the snapshot, and no snapshot at all.
+
+There is no warn-and-continue path. A command that half-works is worse than
+one that fails: the previous version printed a note when the password ref was
+a `<form>` and typed anyway, so the site received nothing and the caller got
+exit 0.
 
 Credentials never go in argv: a value passed as `--password` lands in shell
 history and in the process list, readable by anything running as you. Use
@@ -321,9 +332,11 @@ Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
    the end first, because a click leaves the caret wherever it landed. Never
    clear a field with a loop of `press Backspace` — use `fill`, or
    `press Backspace --times n` in one call.
-   `fill` does not verify the target accepts text. Aimed at a link or a div it
-   reports success and types into nothing. Check the value afterwards with
-   `agent-hands snapshot` or `agent-hands text <selector>`.
+   `fill` checks the aim point before it clicks and refuses a target that holds
+   no text, exit 1. That covers the trap worth knowing: a `<form>`, a `<label>` or a
+   `<div>` COVERS its children, so clicking one focuses whichever input lies under
+   that point. Aiming at a form ref used to type the identifier into the password
+   box and report `tag:"FORM", replaced:true`. Target the input itself.
 4. **Re-resolve after the page changes.** Selectors are resolved fresh on every
    command, so this is automatic — but re-snapshot before choosing a new one.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to
@@ -334,8 +347,8 @@ Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
 | Code | Meaning |
 |---|---|
 | 0 | gesture dispatched |
-| 1 | runtime failure (session down, element not found) |
-| 2 | usage error (unknown command or key) |
+| 1 | runtime failure (session down, element not found, target holds no text) |
+| 2 | usage error (unknown command or key, or a ref that fails its role check) |
 
 With `--json` every result is one line: `{"ok":true,"command":"click",...}` or
 `{"ok":false,"error":"...","code":"ENOTFOUND"}`.

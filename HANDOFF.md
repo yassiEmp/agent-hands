@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.15.0, published 24 Aug 2026.
+npm has 0.15.0. 0.15.1 is committed and not yet published.
 
 ## The four rules the design rests on
 
@@ -94,6 +94,29 @@ npm has 0.15.0, published 24 Aug 2026.
    reachable target. That browser holds their live logins, and the line reads
    as a recommendation rather than a question. The core skill says ask first;
    the CLI output does not.
+
+## Fixed in 0.15.1 (24 Aug 2026) — reported from a real failed login
+
+One bug, two gates, and it is the most expensive one found so far.
+
+A container COVERS its children. Clicking a `<form>` box focuses whichever input
+lies under that point, so `fill --ref <form-ref>` typed the identifier straight
+into the password field and reported `ok:true, tag:"FORM", replaced:true`.
+Measured: `active=INPUT#pw email="" pw="SENTINEL"`. Checking
+`document.activeElement` after the click cannot catch this — focus WAS on a
+good input, just not the one named. The aim point is now probed with
+`elementFromPoint` BEFORE the click, so nothing is dispatched at all.
+
+`login` bypassed that entirely and had its own weaker checks, one of which was
+a `console.error` note that then typed anyway. Aimed at a form ref it printed
+"note: @e1 is a <form> with no type" and reported `✓ filled`, exit 0. Every ref
+is now checked against the snapshot by role before a key is typed, no
+snapshot is a refusal rather than a skipped check, and there is no
+warn-and-continue path left. Six wrong forms exit 2; the correct one still
+works.
+
+Rule this settles: **a check that cannot run is a refusal.** Every
+`if (snap && ...)` silently skipped validation when the store was empty.
 
 ## Fixed in 0.15.0 (24 Aug 2026), all found by walking the CLI
 

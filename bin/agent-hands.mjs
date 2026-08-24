@@ -405,10 +405,19 @@ const endpoint = { ...resolution.endpoint,
         return { data: { ...m, tag: target.tag }, human: `✓ click ${target.tag} at ${at} ${m.points} pts / ${m.ms}ms${m.overshoot ? ' +correction' : ''}` };
       }
       case 'type': {
+        // type aims at whatever holds focus, which may be nothing at all.
+        await requireEditable(cdp, null, 'type');
         const t = await typeText(cdp, rest[0] ?? '', speed);
         return { data: t, human: `✓ type ${t.chars} chars / ${t.ms}ms` };
       }
       case 'fill': {
+        // Check the element under the aim point BEFORE clicking. A <form>, a
+        // <label> or a <div> covers its children, so a click on one focuses
+        // whichever child lies under that point: aiming at the form ref typed
+        // the identifier into the password box and reported tag:"FORM",
+        // replaced:true. Checking after the click is already too late, and
+        // checking focus alone cannot see it — focus WAS on an input.
+        await requireEditable(cdp, target, 'fill');
         await clickAt(cdp, session, target, target.w, speed);
         await sleep(lognormal(180, 0.4, 500));
         const replaced = !args.flags.append;
@@ -648,44 +657,114 @@ async function loginViaCdp(args, cdp, speed, rest) {
     ].join('\n')), { code: 'EUSAGE' });
   }
 
-  // Verify the agent's choice against what the snapshot recorded. Swapping two
-  // refs is the easy mistake, and it is the expensive one: the email goes into
-  // the password box and the password into a plain text input, which the page
-  // may echo, log or submit in the clear. The types are already in the ref
-  // store, so this costs nothing.
+  // Every ref is checked against the snapshot before a single key is typed,
+  // and a check that cannot run is a refusal, never a warning. A command that
+  // half-works is worse than one that fails: the previous version printed a
+  // note when the password ref was a <form> and typed anyway, so the site got
+  // nothing, the caller got exit 0, and the password went into whichever input
+  // happened to sit under that point.
   const snap = loadSnapshot(cdp.key);
-  const typeOf = r => snap?.refs?.[String(r).replace(/^@/, '')]?.type ?? null;
-  const tagOf = r => snap?.refs?.[String(r).replace(/^@/, '')]?.tag ?? null;
-  const pwType = typeOf(pwRef);
-  const idType = typeOf(idRef);
-  if (snap && pwType && pwType !== 'password') {
+  if (!snap || !snap.refs) {
     throw Object.assign(new Error([
-      `${pwRef} is not a password field (it is type="${pwType}").`,
-      '  The password would be typed into a visible input, where the page can',
-      '  echo, log or submit it in the clear. Refusing.',
-      '  Order is: identifier, password, submit.',
-      '  Re-read the page with: agent-hands snapshot',
-    ].join('\n')), { code: 'EUSAGE' });
+      'no snapshot for this browser, so the refs cannot be checked.',
+      '  Refusing rather than typing a password at an unverified target.',
+      '  Run: agent-hands snapshot   then pass the refs it prints.',
+    ].join(String.fromCharCode(10))), { code: 'EUSAGE' });
   }
-  if (snap && idType === 'password') {
-    throw Object.assign(new Error([
-      `${idRef} is a password field, but it was given as the identifier.`,
-      '  Order is: identifier, password, submit. Refusing.',
-    ].join('\n')), { code: 'EUSAGE' });
-  }
-  if (snap && !pwType && tagOf(pwRef)) {
-    console.error(`  note: ${pwRef} is a <${tagOf(pwRef)}> with no type; expected a password input.`);
-  }
+
+  const DEAD = /^(checkbox|radio|button|submit|reset|file|image|range|color)$/;
+  const entryOf = r => snap.refs[String(r).replace(/^@/, '')] || null;
+  const describe = e => e ? '<' + e.tag + (e.type ? ' type="' + e.type + '"' : '') + '>' : '(not in the snapshot)';
+  const listing = pick => Object.entries(snap.refs).filter(([, e]) => pick(e))
+    .map(([r, e]) => '@' + r + ' ' + describe(e)).slice(0, 6);
+
+  const refuse = lines => { throw Object.assign(new Error(lines.join(String.fromCharCode(10))), { code: 'EUSAGE' }); };
+
+  const checkRef = (ref, role) => {
+    const e = entryOf(ref);
+    if (!e) refuse([
+      ref + ' is not in the current snapshot for this browser.',
+      '  Refs go stale on every page change. Re-read the page:',
+      '    agent-hands snapshot',
+    ]);
+    const type = (e.type || '').toLowerCase();
+    const tag = (e.tag || '').toLowerCase();
+
+    if (role === 'password') {
+      if (type !== 'password') refuse([
+        ref + ' is ' + describe(e) + ', not a password input.',
+        '  A password typed anywhere else is visible on screen and in the DOM,',
+        '  and the page can echo, log or submit it in the clear. Refusing.',
+        '  Order is: identifier, password, submit.',
+        ...(listing(x => (x.type || '').toLowerCase() === 'password').length
+          ? ['  password inputs here: ' + listing(x => (x.type || '').toLowerCase() === 'password').join(', ')]
+          : ['  no password input in this snapshot. Re-read: agent-hands snapshot']),
+      ]);
+      return;
+    }
+
+    if (role === 'identifier') {
+      if (type === 'password') refuse([
+        ref + ' is a password input, but it was given as the identifier.',
+        '  Order is: identifier, password, submit. Refusing.',
+      ]);
+      const ok = tag === 'textarea' || (tag === 'input' && !DEAD.test(type || 'text'));
+      if (!ok) refuse([
+        ref + ' is ' + describe(e) + ', which holds no text.',
+        ...(tag === 'input'
+          ? ['  Refusing rather than typing at it.']
+          : ['  A container covers its children, so clicking one focuses whichever',
+             '  input lies under that point — which is how an identifier reaches a',
+             '  password box. Refusing rather than typing at it.']),
+        ...(listing(x => /^(input|textarea)$/.test((x.tag || '').toLowerCase())
+          && !DEAD.test(((x.type || 'text')).toLowerCase()) && (x.type || '').toLowerCase() !== 'password').length
+          ? ['  text inputs here: ' + listing(x => /^(input|textarea)$/.test((x.tag || '').toLowerCase())
+              && !DEAD.test(((x.type || 'text')).toLowerCase()) && (x.type || '').toLowerCase() !== 'password').join(', ')]
+          : []),
+      ]);
+      return;
+    }
+
+    if (role === 'submit') {
+      const ok = tag === 'button' || (tag === 'input' && /^(submit|button|image)$/.test(type));
+      if (!ok) refuse([
+        ref + ' is ' + describe(e) + ', which is not a button.',
+        '  Clicking it would not submit, and login would report success having',
+        '  submitted nothing. Refusing.',
+        ...(listing(x => (x.tag || '').toLowerCase() === 'button'
+          || /^(submit|button|image)$/.test((x.type || '').toLowerCase())).length
+          ? ['  buttons here: ' + listing(x => (x.tag || '').toLowerCase() === 'button'
+              || /^(submit|button|image)$/.test((x.type || '').toLowerCase())).join(', ')]
+          : []),
+        '  Omit the submit ref to fill without submitting.',
+      ]);
+      return;
+    }
+
+    if (role === 'remember') {
+      if (type !== 'checkbox') refuse([
+        ref + ' is ' + describe(e) + ', not a checkbox.',
+        '  Refusing to click it as "remember me".',
+      ]);
+    }
+  };
+
+  checkRef(idRef, 'identifier');
+  checkRef(pwRef, 'password');
+  if (refs.submit) checkRef(refs.submit, 'submit');
+  if (refs.remember) checkRef(refs.remember, 'remember');
 
   const put = async (ref, value) => {
     const box = await locate(cdp, cdp.key, ref, { speed });
+    // Second gate, on the live page. The snapshot says what the element was;
+    // this says what is under the aim point right now.
+    await requireEditable(cdp, box, 'login');
     await clickAt(cdp, args.session, box, box.w, speed);
     await sleep(lognormal(180, 0.4, 500));
     await selectAll(cdp);
     await typeText(cdp, value, speed);
     return box;
   };
-
   await put(idRef, email);
   await sleep(lognormal(320, 0.35, 900));
   await put(pwRef, password);
@@ -722,6 +801,71 @@ async function loginViaCdp(args, cdp, speed, rest) {
 // Refuse a command that cannot do anything, instead of reporting it did.
 // Every message names the fix, because the caller is usually a script that
 // interpolated an empty variable and cannot see the page.
+// Can the thing under the aim point actually hold text?
+//
+// Two ways this used to go wrong, and only the first is obvious. A <form>, a
+// <div> or a <label> accepts a click and holds no text, so keystrokes were
+// discarded with no error. Worse, a container COVERS its children: a click on
+// a form box focuses whichever input lies under that point, so aiming at the
+// form ref typed the identifier straight into the password field while the
+// result said tag:"FORM", replaced:true. Checking document.activeElement after
+// the click cannot catch that — focus was on a perfectly good input, just not
+// the one the caller named. So probe the aim point first, and refuse before a
+// single key is dispatched.
+const EDITABLE_AT = (x, y) => [
+  '(() => {',
+  '  const dead = /^(checkbox|radio|button|submit|reset|file|image|range|color)$/;',
+  '  const ok = e => !!e && (e.tagName === "TEXTAREA" || e.isContentEditable',
+  '    || (e.tagName === "INPUT" && !dead.test((e.getAttribute("type") || "text").toLowerCase())));',
+  '  const name = e => e ? (e.tagName.toLowerCase() + (e.id ? "#" + e.id : "")',
+  '    + (e.getAttribute && e.getAttribute("name") ? "[name=" + e.getAttribute("name") + "]" : "")) : "nothing";',
+  '  const at = document.elementFromPoint(' + x + ', ' + y + ');',
+  '  return { editable: ok(at), at: name(at),',
+  '    fields: [...document.querySelectorAll("input,textarea,[contenteditable]")]',
+  '      .filter(ok).map(name).slice(0, 8) };',
+  '})()',
+].join(String.fromCharCode(10));
+
+const FOCUS_EDITABLE = [
+  '(() => {',
+  '  const a = document.activeElement;',
+  '  const dead = /^(checkbox|radio|button|submit|reset|file|image|range|color)$/;',
+  '  const ok = !!a && (a.tagName === "TEXTAREA" || a.isContentEditable',
+  '    || (a.tagName === "INPUT" && !dead.test((a.getAttribute("type") || "text").toLowerCase())));',
+  '  return { editable: ok, at: a ? a.tagName.toLowerCase() + (a.id ? "#" + a.id : "") : "nothing" };',
+  '})()',
+].join(String.fromCharCode(10));
+
+async function requireEditable(cdp, target, cmd) {
+  const NL2 = String.fromCharCode(10);
+  const r = target
+    ? await cdp.evaluate(EDITABLE_AT(Math.round(target.x), Math.round(target.y)))
+    : await cdp.evaluate(FOCUS_EDITABLE);
+  if (r && r.editable) return;
+
+  const at = (r && r.at) || 'nothing';
+  const named = target ? String(target.tag).toLowerCase() : null;
+  // Only explain the redirect when one actually happened. Naming a button and
+  // hitting that button needs no paragraph about containers.
+  const redirected = Boolean(named) && !at.startsWith(named);
+  const lines = [];
+  lines.push(target
+    ? (redirected
+        ? cmd + ' refused. You named <' + named + '>, but <' + at + '> is under that point.'
+        : cmd + ' refused. <' + at + '> holds no text.')
+    : cmd + ' refused. Focus is on <' + at + '>, which holds no text.');
+  lines.push('  Nothing was typed.');
+  if (redirected) {
+    lines.push('  A container covers its children, so a click on one focuses whichever');
+    lines.push('  input lies under that point. That is how an identifier reaches a');
+    lines.push('  password box while the result still names the container.');
+  }
+  lines.push('  Target the field by its own ref: agent-hands snapshot');
+  if (r && r.fields && r.fields.length) {
+    lines.push('  text fields on this page: ' + r.fields.join(', '));
+  }
+  throw Object.assign(new Error(lines.join(NL2)), { code: 'ENOTEDITABLE' });
+}
 function requireArgs(cmd, rest, args, hasXY) {
   const NL = String.fromCharCode(10);
   const bad = m => { throw Object.assign(new Error(m), { code: 'EUSAGE' }); };
