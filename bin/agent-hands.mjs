@@ -43,7 +43,7 @@ START HERE  (agents: this is the whole loop)
 
 COMMANDS
   launch <url>                start a browser with the right flags, print its port
-  login --identifier-ref ...  fill a form with refs YOU chose; see SIGNING IN
+  login @e2 @e3 @e5           fill a form with refs YOU chose; see SIGNING IN
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
@@ -150,11 +150,13 @@ SIGNING IN
       @e3 [input type="password"] "Password"
       @e5 [button type="submit"] "Log in"
 
-    agent-hands login --cdp 9444 --identifier-ref @e2 --password-ref @e3 \
-      --submit-ref @e5 --email-env EMAIL --password-env PASSWORD
+    agent-hands login @e2 @e3 @e5        identifier, password, submit
 
   snapshot prints that exact command for you when it sees a form, with this
   page's refs already filled in.
+
+  Credentials default to $AGENT_HANDS_EMAIL and $AGENT_HANDS_PASSWORD, so the
+  line above is usually the whole command.
 
   CREDENTIALS NEVER GO IN ARGV. A value passed as --password lands in shell
   history and in the process list, readable by anything running as you.
@@ -248,10 +250,10 @@ function parseArgs(argv) {
     else if (a === '--no-remember') out.flags.noRemember = true;
     else if (a === '--dry-run') out.flags.dryRun = true;
     else if (a === '--force') out.flags.force = true;
-    else if (a === '--identifier-ref') out.flags.identifierRef = argv[++i];
-    else if (a === '--password-ref') out.flags.passwordRef = argv[++i];
-    else if (a === '--submit-ref') out.flags.submitRef = argv[++i];
-    else if (a === '--remember-ref') out.flags.rememberRef = argv[++i];
+    else if (a === '--identifier-ref' || a === '-i') out.flags.identifierRef = argv[++i];
+    else if (a === '--password-ref' || a === '-p') out.flags.passwordRef = argv[++i];
+    else if (a === '--submit-ref' || a === '-s') out.flags.submitRef = argv[++i];
+    else if (a === '--remember-ref' || a === '-r') out.flags.rememberRef = argv[++i];
     else if (a === '--no-hints') out.flags.noHints = true;
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
@@ -499,7 +501,9 @@ function tokenize(line) {
 // Credentials never come from argv by default: a value passed on the command
 // line lands in shell history and in every process listing on the machine.
 function readSecret(args, kind) {
-  const envName = args.flags[`${kind}Env`];
+  const envName = args.flags[`${kind}Env`]
+    || (process.env[kind === 'email' ? 'AGENT_HANDS_EMAIL' : 'AGENT_HANDS_PASSWORD'] !== undefined
+        ? (kind === 'email' ? 'AGENT_HANDS_EMAIL' : 'AGENT_HANDS_PASSWORD') : null);
   if (envName) {
     const v = process.env[envName];
     if (!v) throw Object.assign(new Error(`${envName} is empty or unset`), { code: 'EUSAGE' });
@@ -522,6 +526,26 @@ async function readStdinSecret() {
   return Buffer.concat(chunks).toString('utf8').split('\n')[0].trim();
 }
 
+// Short form first. The long flags still work, but every extra character an
+// agent has to type is another chance to mistype a ref, and a mistyped ref on a
+// login form is the expensive kind of mistake.
+//
+//   agent-hands login @e2 @e3 @e5        identifier, password, submit
+//   agent-hands login @e2 @e3            fill, do not submit
+//
+// Credentials default to $AGENT_HANDS_EMAIL / $AGENT_HANDS_PASSWORD so the
+// common case needs no credential flags at all.
+function loginRefs(args, rest) {
+  const positional = rest.filter(a => /^@?e[0-9]+$/i.test(a));
+  const norm = r => (r ? (r.startsWith('@') ? r : '@' + r) : null);
+  return {
+    identifier: norm(args.flags.identifierRef || positional[0]),
+    password:   norm(args.flags.passwordRef   || positional[1]),
+    submit:     norm(args.flags.submitRef     || positional[2]),
+    remember:   norm(args.flags.rememberRef),
+  };
+}
+
 // Sign in over CDP using refs the AGENT chose.
 //
 // No heuristic decides which box is which. A form can label its fields anything,
@@ -532,18 +556,18 @@ async function readStdinSecret() {
 //
 // This lane needs the browser to be clean: the sign-in guard refuses to run here
 // while navigator.webdriver is true, which is exactly when it would cost you.
-async function loginViaCdp(args, cdp, speed) {
-  const need = (flag, name) => {
-    const v = args.flags[flag];
-    if (!v) throw Object.assign(new Error(
-      `--${name} is required for a ref login.\n` +
-      `  agent-hands snapshot            # read the page, pick the refs\n` +
-      `  agent-hands login --identifier-ref @e5 --password-ref @e7 --submit-ref @e9 \\n` +
-      `    --email-env EMAIL --password-env PASSWORD`), { code: 'EUSAGE' });
-    return v;
-  };
-  const idRef = need('identifierRef', 'identifier-ref');
-  const pwRef = need('passwordRef', 'password-ref');
+async function loginViaCdp(args, cdp, speed, rest) {
+  const refs = loginRefs(args, rest);
+  if (!refs.identifier || !refs.password) {
+    throw Object.assign(new Error([
+      'login needs an identifier ref and a password ref.',
+      '  agent-hands snapshot                 read the page and pick them',
+      '  agent-hands login @e2 @e3 @e5        identifier, password, submit',
+      '  (long form --identifier-ref/--password-ref/--submit-ref also works)',
+    ].join('\n')), { code: 'EUSAGE' });
+  }
+  const idRef = refs.identifier;
+  const pwRef = refs.password;
   const email = readSecret(args, 'email');
   const password = args.flags.passwordStdin ? await readStdinSecret() : readSecret(args, 'password');
   if (!email || !password) {
@@ -567,8 +591,8 @@ async function loginViaCdp(args, cdp, speed) {
   await sleep(lognormal(320, 0.35, 900));
   await put(pwRef, password);
 
-  if (args.flags.rememberRef) {
-    const box = await locate(cdp, cdp.key, args.flags.rememberRef, { speed });
+  if (refs.remember) {
+    const box = await locate(cdp, cdp.key, refs.remember, { speed });
     await clickAt(cdp, args.session, box, box.w, speed);
   }
 
@@ -581,13 +605,13 @@ async function loginViaCdp(args, cdp, speed) {
              human: renderChallenge(ch) + '\n\n  Filled but NOT submitted. Solve it, then re-run with --submit-only.' };
   }
 
-  if (args.flags.submitRef) {
+  if (refs.submit) {
     await sleep(lognormal(400, 0.35, 1200));
-    const box = await locate(cdp, cdp.key, args.flags.submitRef, { speed });
+    const box = await locate(cdp, cdp.key, refs.submit, { speed });
     await clickAt(cdp, args.session, box, box.w, speed);
     return { state: 'submitted', webdriver: v.webdriver === true };
   }
-  return { state: 'filled', note: 'no --submit-ref given; nothing was submitted' };
+  return { state: 'filled', note: 'no submit ref given; filled but not submitted' };
 }
 
 
@@ -616,16 +640,15 @@ function loginHint(snap) {
     || fields.find(([, e]) => e.type !== 'checkbox' && e.type !== 'submit')?.[0];
   const submit = refs.find(([, e]) => e.type === 'submit' || e.tag === 'button')?.[0];
   const remember = refs.find(([, e]) => e.type === 'checkbox')?.[0];
-  const cmd = `  agent-hands login --identifier-ref @${id ?? 'eN'} --password-ref @${pw}`
-    + (remember ? ` --remember-ref @${remember}` : '')
-    + (submit ? ` --submit-ref @${submit}` : '')
-    + ' --email-env EMAIL --password-env PASSWORD';
+  const order = [id ?? 'eN', pw, submit].filter(Boolean).map(r => '@' + r).join(' ');
   return [
-    'this page has a sign-in form. To fill it without guessing:',
-    cmd,
-    'You choose the refs; the CLI types at human rate and keeps the secret out',
-    'of argv, output and logs. Omit --submit-ref to fill without submitting.',
-  ];
+    'this page has a sign-in form. Fill it without guessing:',
+    '  agent-hands login ' + order + '   (identifier, password, submit)',
+    remember ? '  add -r @' + remember + ' to tick "remember me"' : null,
+    'You pick the refs; the CLI types at human rate. Credentials come from',
+    '$AGENT_HANDS_EMAIL and $AGENT_HANDS_PASSWORD, or --email-env/--password-env.',
+    'Drop the last ref to fill without submitting.',
+  ].filter(Boolean);
 }
 
 async function runBatch(args) {
@@ -735,7 +758,8 @@ async function main() {
       `          agent-hands login --cdp ${r.port} --email-env EMAIL --password-env PASSWORD`);
   }
 
-  if (cmd === 'login' && (args.flags.identifierRef || args.flags.passwordRef)) {
+  if (cmd === 'login' && (args.flags.identifierRef || args.flags.passwordRef
+      || rest.some(a => /^@?e[0-9]+$/i.test(a)))) {
     const endpoint = {
       session: args.session, cdp: args.cdp, browser: args.browser,
       userDataDir: args.userDataDir, tab: args.tab, activate: args.activate !== false,
@@ -746,13 +770,30 @@ async function main() {
         const g = verdict(await inspectPage(cdp));
         if (g.block) throw Object.assign(new Error(explainGuard(g)), { code: 'ELOGINPAGE' });
       }
-      const r = await loginViaCdp(args, cdp, args.speed);
+      const r = await loginViaCdp(args, cdp, args.speed, rest);
       if (r.state === 'challenge') process.exitCode = 3;
       if (args.json) return console.log(JSON.stringify({ ok: r.state !== 'challenge', command: 'login', ...r }));
       return console.log(r.human ?? `✓ ${r.state}`);
     } finally {
       await cdp.drain(); cdp.close();
     }
+  }
+
+  if (cmd === 'login' && !args.flags.window && !args.tab) {
+    throw Object.assign(new Error([
+      'login needs to know what to fill.',
+      '',
+      '  Read the page, then name the refs:',
+      '    agent-hands snapshot --cdp <port>',
+      '    agent-hands login @e2 @e3 @e5      identifier, password, submit',
+      '',
+      '  snapshot prints that exact line for you when it sees a form.',
+      '  Credentials come from $AGENT_HANDS_EMAIL and $AGENT_HANDS_PASSWORD,',
+      '  or --email-env NAME / --password-env NAME. Never as a bare --password.',
+      '',
+      '  For a browser you cannot relaunch, the OS-accessibility lane instead:',
+      '    agent-hands login --window "<part of the window title>"',
+    ].join('\n')), { code: 'EUSAGE' });
   }
 
   if (cmd === 'login') {

@@ -124,6 +124,10 @@ Credentials never go in argv: a value passed as `--password` lands in shell
 history and in the process list, readable by anything running as you. Use
 `--email-env` / `--password-env`, or `--password-stdin`.
 
+Clearing the webdriver flag removes ONE signal. It is not a cloak: Turnstile,
+DataDome and the rest score dozens of others and may still challenge you, even
+through this CLI. Expect it and use `--pause-on-challenge`.
+
 A challenge is detected after filling and before submitting, and handed to you.
 It is never solved programmatically: an invoke leaves no pointer trace, which
 scores worse than not clicking, and the account is what pays.
