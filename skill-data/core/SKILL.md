@@ -276,8 +276,8 @@ Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
    every page change: re-snapshot, then use the new ref.
 1. **Prefer a CSS selector.** `--text` ranks candidates — exact over partial,
    real text over `aria-label`, button over field — but a page with several
-   "Search" controls can still resolve the wrong one. Get selectors from
-   `agent-browser snapshot -i`.
+   "Search" controls can still resolve the wrong one. Get refs from
+   `agent-hands snapshot`, which works on a browser agent-browser cannot reach.
 2. **Submit with `press Enter`.** Do not hunt for the submit button. Verified:
    `fill "#searchbox_input"` then `press Enter` returns real results.
 3. **`fill` replaces; `type` does not.** `fill` clicks, selects all, then types,
@@ -287,7 +287,7 @@ Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
    `press Backspace --times n` in one call.
    `fill` does not verify the target accepts text. Aimed at a link or a div it
    reports success and types into nothing. Check the value afterwards with
-   `agent-browser snapshot -i`.
+   `agent-hands snapshot` or `agent-hands text <selector>`.
 4. **Re-resolve after the page changes.** Selectors are resolved fresh on every
    command, so this is automatic — but re-snapshot before choosing a new one.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to

@@ -8,7 +8,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { browserNames, browserDir, profileDir, readPortFile, portAlive } from './cdp.mjs';
+
+// Browsers this CLI started itself. Without these a browser the agent launched
+// a moment ago is absent from the list, and the summary line happily points at
+// a stale endpoint instead — measured: launch created port 60066 and this
+// command still recommended a closed browser on 52245.
+const OWN = path.join(os.homedir(), '.agent-hands-profiles');
 
 const POOL = ['work', 'work-2', 'work-3', 'work-4', 'work-5'];
 
@@ -47,6 +54,17 @@ export async function survey() {
                 state: probe.state, detail: probe.detail, portFile: found?.file ?? null });
   }
 
+  if (fs.existsSync(OWN)) {
+    for (const e of fs.readdirSync(OWN, { withFileTypes: true }).filter(d => d.isDirectory())) {
+      const dir = path.join(OWN, e.name);
+      const found = readPortFile(dir);
+      const probe = found ? await probeEndpoint(found.port)
+                          : { state: 'off', detail: 'launched profile, not running' };
+      rows.push({ kind: 'launched', name: e.name, dir, port: found?.port ?? null,
+                  state: probe.state, detail: probe.detail, portFile: found?.file ?? null });
+    }
+  }
+
   for (const name of browserNames()) {
     const dir = browserDir(name);
     if (!dir || !fs.existsSync(dir)) continue;           // browser not installed
@@ -68,9 +86,13 @@ export function render(rows) {
   const w = Math.max(...rows.map(r => r.name.length));
   const out = [];
 
+  const flagFor = r => r.kind === 'pool' ? `--session ${r.name}`
+    : r.kind === 'launched' ? `--cdp ${r.port ?? '<port>'}`
+    : `--browser ${r.name}`;
+
   out.push('BROWSERS');
   for (const r of rows) {
-    const flag = r.kind === 'pool' ? `--session ${r.name}` : `--browser ${r.name}`;
+    const flag = flagFor(r);
     out.push(`  ${MARK[r.state] ?? '?'} ${r.name.padEnd(w)}  ${String(r.port ?? '-').padEnd(6)}`
       + `  ${r.detail}`.padEnd(38) + `  ${flag}`);
   }
@@ -86,10 +108,12 @@ export function render(rows) {
     }
     out.push(`  Or start a throwaway one:`);
     out.push(`    agent-browser --session work --profile "${profileDir('work')}" open <url> --headed`);
-  } else if (live.length === 1) {
-    const r = live[0];
-    out.push(`One endpoint answers: ${r.name}`
-      + `  (${r.kind === 'pool' ? `--session ${r.name}` : `--browser ${r.name}`})`);
+  } else if (live.length === 1 || live.some(r => r.kind === 'launched')) {
+    const r = live.find(x => x.kind === 'launched') ?? live[0];
+    out.push(`Use this one: ${r.name}   ${flagFor(r)}`);
+    if (r.kind === 'launched') {
+      out.push('  This one was started by agent-hands, so it carries the clean flags.');
+    }
     if (r.kind === 'external') {
       out.push('  Answering HTTP is not proof the browser is open — a closed one can');
       out.push('  leave this port behind. Confirm with: agent-hands doctor '

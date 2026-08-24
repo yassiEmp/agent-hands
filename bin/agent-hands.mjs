@@ -11,7 +11,7 @@ import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } from '../cli/version.mjs';
 import { tail } from '../cli/audit.mjs';
-import { capture, save, render, locate } from '../cli/snapshot.mjs';
+import { capture, save, render, locate, load as loadSnapshot } from '../cli/snapshot.mjs';
 import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
 import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
@@ -198,8 +198,8 @@ NOTES
   \`agent-browser --session <s> snapshot -i\`.
   Submit forms with \`press Enter\` rather than hunting for a submit button.
   Inside an iframe, --text and CSS selectors fail: page JS cannot cross the
-  boundary. Use --ref with a ref from \`agent-browser snapshot -i\`, which
-  carries frame context. --ref scrolls the element into view first.
+  boundary. Use --ref from \`agent-hands snapshot\`, which works on any browser
+  this CLI can reach. --ref scrolls the element into view first.
   Refs go stale on every page change. Re-snapshot before reusing one.
   Google sign-in refuses any CDP-driven browser. That is a browser check, not
   a behaviour check, so this tool cannot help. Sign in by hand in a Chrome
@@ -578,6 +578,35 @@ async function loginViaCdp(args, cdp, speed, rest) {
     ].join('\n')), { code: 'EUSAGE' });
   }
 
+  // Verify the agent's choice against what the snapshot recorded. Swapping two
+  // refs is the easy mistake, and it is the expensive one: the email goes into
+  // the password box and the password into a plain text input, which the page
+  // may echo, log or submit in the clear. The types are already in the ref
+  // store, so this costs nothing.
+  const snap = loadSnapshot(cdp.key);
+  const typeOf = r => snap?.refs?.[String(r).replace(/^@/, '')]?.type ?? null;
+  const tagOf = r => snap?.refs?.[String(r).replace(/^@/, '')]?.tag ?? null;
+  const pwType = typeOf(pwRef);
+  const idType = typeOf(idRef);
+  if (snap && pwType && pwType !== 'password') {
+    throw Object.assign(new Error([
+      `${pwRef} is not a password field (it is type="${pwType}").`,
+      '  The password would be typed into a visible input, where the page can',
+      '  echo, log or submit it in the clear. Refusing.',
+      '  Order is: identifier, password, submit.',
+      '  Re-read the page with: agent-hands snapshot',
+    ].join('\n')), { code: 'EUSAGE' });
+  }
+  if (snap && idType === 'password') {
+    throw Object.assign(new Error([
+      `${idRef} is a password field, but it was given as the identifier.`,
+      '  Order is: identifier, password, submit. Refusing.',
+    ].join('\n')), { code: 'EUSAGE' });
+  }
+  if (snap && !pwType && tagOf(pwRef)) {
+    console.error(`  note: ${pwRef} is a <${tagOf(pwRef)}> with no type; expected a password input.`);
+  }
+
   const put = async (ref, value) => {
     const box = await locate(cdp, cdp.key, ref, { speed });
     await clickAt(cdp, args.session, box, box.w, speed);
@@ -694,12 +723,24 @@ async function runBatch(args) {
         if (isInput && lastInput && gap > 0) await sleep(lognormal(gap, 0.28, gap * 3));
         lastInput = isInput;
 
+        // The guard runs here too. run() skips it on a borrowed connection, so
+        // without this the protection was absent in exactly the mode the docs
+        // tell an agent to prefer. One evaluate per line, a couple of ms.
+        if (!args.flags.force && !GUARD_EXEMPT.has(cmd)) {
+          const g = verdict(await inspectPage(cdp));
+          if (g.block) throw Object.assign(new Error(explainGuard(g)), { code: 'ELOGINPAGE' });
+        }
         const r = await run(la, cmd, rest, cdp);
         out = { i, ok: true, command: cmd, ...r.data };
       } catch (e) {
         out = { i, ok: false, command: line.slice(0, 40), error: e.message, code: e.code ?? 'EFAIL' };
         worst = Math.max(worst, EXIT[e.code] ?? 1);
-        if (args.flags.stopOnError) { process.stdout.write(JSON.stringify(out) + '\n'); break; }
+        // A sign-in block is not a per-line failure: every remaining line would
+        // hit the same wall and repeat the same paragraph. Stop and say it once.
+        if (args.flags.stopOnError || e.code === 'ELOGINPAGE') {
+          process.stdout.write(JSON.stringify(out) + '\n');
+          break;
+        }
       }
       process.stdout.write(JSON.stringify(out) + '\n');
     }
