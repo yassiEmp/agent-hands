@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // agent-hands — human-rate mouse and keyboard for an agent-browser session.
 //
-// Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved.
+// Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved,
+// 4 sign-in page while flagged, 5 several browsers live (ask the user), 6 dead pin.
 
 import { readFileSync, createReadStream } from 'node:fs';
 import readline from 'node:readline';
@@ -14,6 +15,10 @@ import { tail } from '../cli/audit.mjs';
 import { capture, save, render, locate, load as loadSnapshot } from '../cli/snapshot.mjs';
 import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
 import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
+import { load as loadConfig, save as saveConfig, clear as clearConfig, agentId, mintId,
+         pinFrom, stamp, conflict } from '../cli/config.mjs';
+import { resolve as resolveTargetCfg, endpointFor, flagFor } from '../cli/target.mjs';
+import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { loginFlow } from '../cli/login.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
@@ -42,6 +47,7 @@ START HERE  (agents: this is the whole loop)
   you need is missing, say so; do not route around it.
 
 COMMANDS
+  use [<n>|--cdp <port>]      pin a browser; later commands need no target flag
   launch <url>                start a browser with the right flags, print its port
   login @e2 @e3 @e5           fill a form with refs YOU chose; see SIGNING IN
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
@@ -105,6 +111,41 @@ YOUR OWN BROWSER
   so --ref works on your own browser too. Refs are bound to the tab they came
   from: navigate or switch tab and a stale ref refuses to click rather than
   hitting the wrong element. Re-snapshot after anything that changes the page.
+
+STATE  (stop retyping the target)
+  Pin a browser once and later commands need no target flag.
+
+    agent-hands browsers        see what is live
+    agent-hands use 2           pin number 2 (ask the user first, if unsure)
+    agent-hands snapshot        no --cdp, no --browser
+    agent-hands use             show what is pinned, and where the file is
+    agent-hands use --clear     drop it
+
+  Written to ./.agent-hands/config.json, found by walking up from the working
+  directory. --global writes ~/.agent-hands/config.json instead.
+
+  Three rules keep hidden state from becoming a hidden bug:
+    An explicit flag ALWAYS wins, so the escape hatch never disappears.
+    A pin is verified live before use. A dead one REFUSES and names the fix,
+      it never falls back to another browser - silent fallback is the bug.
+    Every result reports how it resolved: "via":"flag"|"pin"|"only-one".
+
+  With several browsers live and nothing pinned, commands STOP and list them
+  rather than choosing. That is the moment to ask the user which one.
+
+  IDENTITY. Pins are per project and per agent. The agent id is discovered from
+  the environment (any var named like *_SESSION_ID, *_CONVERSATION_ID), so it
+  works on any harness, not just one. No harness exposes a PER-SUBAGENT id -
+  measured: two sibling subagents share every environment variable, and it is an
+  open request on claude-code #36981 and codex #20852. So parallel subagents
+  that need DIFFERENT browsers must each set one:
+
+    AGENT_HANDS_ID=sweep-3
+
+  A parent assigning browsers to subagents is the natural place for it. Without
+  it they share one pin, which is correct for delegation and wrong for a
+  parallel sweep; replacing another writer's fresh pin prints a warning saying
+  exactly this.
 
 BATCH  (use this for anything more than 2-3 steps)
   Every command pays a process start and a connect. "run" pays both once and
@@ -217,7 +258,7 @@ function parseArgs(argv) {
   const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--session') out.session = argv[++i];
+    if (a === '--session') { out.session = argv[++i]; out.explicitSession = true; }
     else if (a === '--browser') out.browser = argv[++i];
     else if (a === '--cdp') out.cdp = argv[++i];
     else if (a === '--user-data-dir') out.userDataDir = argv[++i];
@@ -255,6 +296,9 @@ function parseArgs(argv) {
     else if (a === '--submit-ref' || a === '-s') out.flags.submitRef = argv[++i];
     else if (a === '--remember-ref' || a === '-r') out.flags.rememberRef = argv[++i];
     else if (a === '--no-hints') out.flags.noHints = true;
+    else if (a === '--global') out.flags.global = true;
+    else if (a === '--project') out.flags.projectScope = true;
+    else if (a === '--clear') out.flags.clear = true;
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
@@ -271,12 +315,16 @@ const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doct
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
   const CHALLENGE_WAIT = args.flags.challengeWait ? args.flags.challengeWait * 1000 : CHALLENGE_WAIT_DEFAULT;
-  const endpoint = {
-    session, cdp: args.cdp, browser: args.browser, userDataDir: args.userDataDir,
-    tab: args.tab, activate: args.activate !== false,
-  };
-  const external = Boolean(args.cdp || args.browser || args.userDataDir);
-  const label = args.browser || args.userDataDir || (args.cdp ? `cdp ${args.cdp}` : session);
+// One resolution path for every command: flag > pin > only-live > default.
+// Anything else and two call sites drift, which is how a command ends up
+// driving a browser nobody chose.
+const resolution = await resolveTargetCfg(args);
+args._via = resolution.via;   // provenance, reported to the caller
+const endpoint = { ...resolution.endpoint,
+  ...(args.tab ? { tab: args.tab } : {}), activate: args.activate !== false };
+  const external = Boolean(endpoint.cdp || endpoint.browser || endpoint.userDataDir);
+  const label = endpoint.browser || endpoint.userDataDir
+    || (endpoint.cdp ? `cdp ${endpoint.cdp}` : endpoint.session || session);
 
   if (cmd === 'doctor') {
     const { port } = resolveEndpoint(endpoint);
@@ -297,7 +345,7 @@ async function run(args, cmd, rest, shared) {
       : '';
     return {
       data: out,
-      human: `✓ ${label} ready — ${out.title || '(untitled)'} @ ${out.url}\n`
+      human: `✓ ${label} ready [${args._via}] — ${out.title || '(untitled)'} @ ${out.url}\n`
         + `  ${out.profile ? `profile ${out.profile}` : 'external browser — you launched it, not agent-browser'}\n`
         + `  browser ${out.browser}  port ${out.port}  viewport ${out.viewport}`
         + `  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}${warn}`,
@@ -680,11 +728,117 @@ function loginHint(snap) {
   ].filter(Boolean);
 }
 
+// `use` — pin a browser once, stop retyping it, and give the agent a way to put
+// the choice in front of the human instead of guessing.
+async function useCommand(args, rest) {
+  const cwd = process.cwd();
+  const scope = args.flags.global ? 'global' : args.flags.projectScope ? 'project' : 'agent';
+
+  if (args.flags.clear) {
+    const f = clearConfig({ scope, cwd });
+    return console.log(f ? `✓ cleared the ${scope} pin (${f})` : 'nothing pinned here.');
+  }
+
+  // No argument: report, do not change. The pin must be discoverable in one
+  // word, or it is hidden state and this feature is a net loss.
+  if (!rest.length && !args.cdp && !args.browser && !args.userDataDir) {
+    const { merged, id, projectPath, globalPath } = loadConfig(cwd);
+    const lines = ['CURRENT'];
+    lines.push(`  identity   ${id ?? '(none — pins are project-wide)'}`);
+    lines.push(`  project    ${projectPath ?? '(no .agent-hands here; a pin would create one)'}`);
+    lines.push(`  global     ${globalPath}`);
+    if (merged.target) {
+      const t = merged.target;
+      lines.push(`  pinned     ${t.cdp ? `--cdp ${t.cdp}` : t.browser ? `--browser ${t.browser}`
+        : t.session ? `--session ${t.session}` : t.userDataDir}`);
+      if (t.profile) lines.push(`             profile ${t.profile}`);
+      if (t.tab) lines.push(`             tab "${t.tab}"`);
+    } else {
+      lines.push('  pinned     nothing');
+    }
+    const others = Object.entries(merged).filter(([k]) => !k.startsWith('_') && k !== 'target');
+    for (const [k, v] of others) lines.push(`  ${k.padEnd(10)} ${JSON.stringify(v)}`);
+    lines.push('');
+    lines.push('  agent-hands use <n>        pin one of the live browsers');
+    lines.push('  agent-hands use --clear    drop it');
+    return console.log(lines.join('\n'));
+  }
+
+  // Resolve what to pin: a number from the live list, or explicit flags.
+  let endpoint, row = null;
+  const n = Number(rest[0]);
+  if (Number.isInteger(n) && n > 0) {
+    const live = (await survey()).filter(r => r.state === 'running');
+    row = live[n - 1];
+    if (!row) {
+      throw Object.assign(new Error(
+        `there is no browser ${n}. ${live.length} live:\n` +
+        live.map((r, i) => `  ${i + 1}  ${r.name}  ${flagFor(r)}`).join('\n')), { code: 'EUSAGE' });
+    }
+    endpoint = endpointFor(row);
+  } else {
+    endpoint = { ...(args.cdp && { cdp: args.cdp }), ...(args.browser && { browser: args.browser }),
+                 ...(args.userDataDir && { userDataDir: args.userDataDir }) };
+    if (!Object.keys(endpoint).length) {
+      throw Object.assign(new Error(
+        'nothing to pin. Give a number from `agent-hands browsers`, or a target:\n' +
+        '  agent-hands use 2\n  agent-hands use --cdp 60066\n  agent-hands use --browser edge'),
+        { code: 'EUSAGE' });
+    }
+  }
+  if (args.tab) endpoint.tab = args.tab;
+
+  // Verify before pinning. Pinning something dead just moves the failure later.
+  const port = row?.port ?? endpoint.cdp ?? null;
+  const probe = port ? await probeEndpoint(port) : { state: 'running', detail: null };
+  if (probe.state !== 'running') {
+    throw Object.assign(new Error(
+      `that browser is not answering (${probe.detail}). Nothing pinned.\n` +
+      '  agent-hands browsers   see what is live'), { code: 'EUSAGE' });
+  }
+
+  // Identity, and the honest bit: no harness exposes a per-subagent id, so two
+  // siblings look identical here. Mint one and say so, rather than pretending.
+  const pin0 = pinFrom(endpoint, {});
+  const existing = loadConfig(cwd).merged;
+  const clash = conflict(existing, pin0);
+  let issued = null;
+  if (!agentId()) issued = mintId();
+
+  const pin = pinFrom(endpoint, {
+    port, browserVersion: probe.detail, profile: row?.dir ?? null, now: Date.now(),
+  });
+  const { file, scope: wrote } = saveConfig(stamp({ target: pin }), { scope, cwd });
+
+  const out = [`✓ pinned ${row ? row.name : (endpoint.cdp ? `cdp ${endpoint.cdp}` : endpoint.browser)}`
+    + `   ${flagFor(row ?? { kind: endpoint.cdp ? 'launched' : 'external', name: endpoint.browser, port })}`,
+    `  written to ${file} (${wrote} scope)`];
+  if (endpoint.tab) out.push(`  tab "${endpoint.tab}"`);
+  out.push('  later commands need no target flag. An explicit flag still wins.');
+  if (clash) {
+    out.push('');
+    out.push(`  ! replaced a pin set ${clash.ageSec}s ago by a different writer.`);
+    out.push('    If several agents share this project, give each its own identity —');
+    out.push('    no harness exposes a per-subagent id, so they are identical to me:');
+    out.push('      AGENT_HANDS_ID=<name>   (set it in each agent, once)');
+  }
+  if (issued) {
+    out.push('');
+    out.push(`  identity: none found, so pins here are shared by every agent in this project.`);
+    out.push(`  To make this pin yours alone: AGENT_HANDS_ID=${issued}`);
+  }
+  return console.log(out.join('\n'));
+}
+
+
 async function runBatch(args) {
-  const endpoint = {
-    session: args.session, cdp: args.cdp, browser: args.browser,
-    userDataDir: args.userDataDir, tab: args.tab, activate: args.activate !== false,
-  };
+// One resolution path for every command: flag > pin > only-live > default.
+// Anything else and two call sites drift, which is how a command ends up
+// driving a browser nobody chose.
+const resolution = await resolveTargetCfg(args);
+args._via = resolution.via;   // provenance, reported to the caller
+const endpoint = { ...resolution.endpoint,
+  ...(args.tab ? { tab: args.tab } : {}), activate: args.activate !== false };
   // Connect BEFORE opening the reader. A readline interface starts consuming
   // immediately, so building it first meant the file drained into a listener
   // that did not exist yet while we awaited the socket, and every line was lost.
@@ -801,10 +955,16 @@ async function main() {
 
   if (cmd === 'login' && (args.flags.identifierRef || args.flags.passwordRef
       || rest.some(a => /^@?e[0-9]+$/i.test(a)))) {
-    const endpoint = {
-      session: args.session, cdp: args.cdp, browser: args.browser,
-      userDataDir: args.userDataDir, tab: args.tab, activate: args.activate !== false,
-    };
+  // One resolution path for every command: flag > pin > only-live > default.
+  // Anything else and two call sites drift, which is how a command ends up
+  // driving a browser nobody chose.
+  const resolution = await resolveTargetCfg(args);
+  args._via = resolution.via;   // provenance, reported to the caller
+  const endpoint = { ...resolution.endpoint,
+    ...(args.tab ? { tab: args.tab } : {}), activate: args.activate !== false };
+  // Provenance travels with the result. An agent that can see "via":"pin" can
+  // notice it is on the wrong browser now, instead of after twenty commands.
+  args._via = resolution.via;
     const cdp = await CDP.connect(endpoint);
     try {
       if (!args.flags.force) {
@@ -864,6 +1024,8 @@ async function main() {
     return console.log(`✓ ${r.state}${r.window ? ' — ' + r.window : ''}`);
   }
 
+  if (cmd === 'use') return useCommand(args, rest);
+
   if (cmd === 'run') return runBatch(args);
 
   if (cmd === 'browsers') {
@@ -905,7 +1067,8 @@ async function main() {
 
   const upd = args.flags.noUpdateCheck ? null : updateField(staleness());
   if (args.json) {
-    console.log(JSON.stringify({ ok: true, command: cmd, ...result.data, ...(upd ? { update: upd } : {}) }));
+    console.log(JSON.stringify({ ok: true, command: cmd, ...result.data,
+      ...(args._via ? { via: args._via } : {}), ...(upd ? { update: upd } : {}) }));
   } else {
     console.log(result.human);
   }
@@ -913,7 +1076,7 @@ async function main() {
 
 // 3 is its own code so a caller can tell "a human needs to click something"
 // apart from a real failure, and retry instead of giving up.
-const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4 };
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6 };
 
 main().catch(err => {
   if (process.argv.includes('--json')) {

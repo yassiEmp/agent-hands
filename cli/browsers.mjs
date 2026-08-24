@@ -24,7 +24,7 @@ const POOL = ['work', 'work-2', 'work-3', 'work-4', 'work-5'];
 // debugging socket, so TCP alone reported "running" for a browser with no
 // windows. Ask for HTTP: a real endpoint answers, classic with 200 and M144
 // with 404. Anything else is squatting on the port.
-async function probeEndpoint(port) {
+export async function probeEndpoint(port) {
   if (!(await portAlive(port, 800))) return { state: 'dead', detail: 'nothing listening' };
   try {
     const r = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1200) });
