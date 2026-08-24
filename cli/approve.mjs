@@ -23,8 +23,8 @@
 // LIMITATION. The modal names no requester, so this approves ANY pending debugging prompt. Do not
 // run it while a connection you did not start is waiting.
 
-import { spawn } from 'node:child_process';
-import fs from 'node:fs';
+import { agentWin, agentWinMissing } from './uia.mjs';
+export { agentWinMissing };
 
 // "Allow" as Chromium ships it. Compared case-insensitively, accents intact.
 // An unlisted language is not a failure: it prints the buttons it found so this list can grow.
@@ -46,72 +46,6 @@ const POLL_MS = 400;
 //   2. `agent-win` on PATH (pip install, or the repo's shim)
 //   3. `python -m agent_win` (pip install), optionally with $AGENT_WIN_HOME for a git checkout
 // Resolved once, then cached, so a missing tool costs one probe rather than one per poll.
-let RESOLVED;
-
-function candidates() {
-  const python = process.env.AGENT_WIN_PYTHON || 'python';
-  const list = [];
-  // AGENT_WIN is documented as an executable, but a checkout path is the
-  // obvious thing to put there, and spawning a directory fails silently: all
-  // three candidates miss, no approver runs, and the connect hangs 60s behind
-  // an unanswered modal. Treat a directory as the module home instead.
-  const win = process.env.AGENT_WIN;
-  const winDir = win && isDir(win) ? win : null;
-  if (win && !winDir) list.push({ cmd: win, pre: [] });
-  // No shell. Node warns that shell:true concatenates rather than escapes arguments, and these
-  // arguments contain user-visible button text. `pip install agent-win` puts a real executable on
-  // PATH, and `python -m agent_win` covers both a pip install and a checkout via AGENT_WIN_HOME.
-  list.push({ cmd: 'agent-win', pre: [] });
-  list.push({ cmd: python, pre: ['-m', 'agent_win'], home: winDir });
-  return list;
-}
-
-function isDir(p) {
-  try { return fs.statSync(p).isDirectory(); } catch { return false; }
-}
-
-function spawnOnce({ cmd, pre, home }, args) {
-  return new Promise(resolve => {
-    let out = '';
-    let child;
-    try {
-      child = spawn(cmd, [...pre, ...args], {
-        env: {
-          ...process.env,
-          PYTHONPATH: home || process.env.AGENT_WIN_HOME || process.env.PYTHONPATH || '',
-          PYTHONIOENCODING: 'utf-8',            // button names are not ascii
-        },
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-    } catch {
-      return resolve(null);
-    }
-    child.stdout.on('data', d => { out += d; });
-    child.on('error', () => resolve(null));
-    child.on('close', code => resolve(code === 0 ? out : null));
-  });
-}
-
-async function agentWin(args) {
-  if (RESOLVED === null) return null;                 // known absent
-  if (RESOLVED) return spawnOnce(RESOLVED, args);
-  // Probe with the REAL arguments. A separate `help` call spent a whole Python
-  // start per connect and threw the answer away, and this runs while a modal is
-  // holding the browser handshake open, so every second is paid by the user.
-  for (const c of candidates()) {
-    const out = await spawnOnce(c, args);
-    if (out !== null) {
-      RESOLVED = c;
-      return out;
-    }
-  }
-  RESOLVED = null;
-  return null;
-}
-
-export function agentWinMissing() {
-  return RESOLVED === null;
-}
 
 function isAllow(name) {
   const n = (name || '').trim().toLowerCase().replace(/[.…!]+$/, '');

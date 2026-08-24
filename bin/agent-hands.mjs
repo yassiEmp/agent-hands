@@ -14,6 +14,8 @@ import { tail } from '../cli/audit.mjs';
 import { capture, save, render, locate } from '../cli/snapshot.mjs';
 import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
 import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
+import { launch, browserChoices } from '../cli/launch.mjs';
+import { loginFlow } from '../cli/login.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -39,6 +41,8 @@ START HERE  (agents: this is the whole loop)
   you need is missing, say so; do not route around it.
 
 COMMANDS
+  launch <url>                start a browser with the right flags, print its port
+  login [--dry-run]           sign in through the OS layer, before CDP attaches
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
@@ -121,6 +125,36 @@ BATCH  (use this for anything more than 2-3 steps)
   leave a natural gap; batching removes it, so a small pause is inserted (--gap
   ms, default 250, 0 disables). Reads are exempt - they emit no input event.
 
+SIGNING IN  (UIA before CDP, never the other way round)
+  Attaching CDP sets navigator.webdriver, and a login form is the worst moment
+  to carry it. So authenticate through the OS accessibility layer with nothing
+  attached, and connect CDP only afterwards.
+
+    agent-hands launch https://example.com/login --browser edge --profile work
+    agent-hands login --window "example" --email-env EMAIL --password-env PASSWORD
+    agent-hands snapshot --cdp <port>          # now attach, and carry on
+
+  launch passes the flags that matter: --force-renderer-accessibility (without
+  it Chromium builds no page tree and the OS lane sees only toolbar),
+  --disable-blink-features=AutomationControlled (removes navigator.webdriver at
+  the source), a dedicated profile, and the URL as an argument rather than a
+  later navigation.
+
+  login reads any standard form: an identifier field, a password field, an
+  optional "remember me", one submit button, matched by role then by name across
+  languages. Two-step forms that ask for the identifier first are handled. If it
+  is already signed in it says so and does nothing.
+
+  CREDENTIALS NEVER GO IN ARGV. A value passed as --password lands in shell
+  history and in the process list, readable by anything running as you.
+    --email-env NAME --password-env NAME      read from the environment
+    --password-stdin                          read one line from stdin
+  --dry-run reports the form it found and types nothing.
+
+  A challenge (Turnstile, hCaptcha) is detected and handed to you, never solved:
+  a programmatic click leaves no pointer trace, which scores worse than not
+  clicking, and the account is what pays. Exit 3 if it is still there.
+
 CHALLENGES
   A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
   tool tries to defeat. Those stacks score behaviour and correlate identity
@@ -189,6 +223,16 @@ function parseArgs(argv) {
     else if (a === '--gap') out.flags.gap = Math.max(0, Number(argv[++i]) || 0);
     else if (a === '--file') out.flags.file = argv[++i];
     else if (a === '--stop-on-error') out.flags.stopOnError = true;
+    else if (a === '--email') out.flags.email = argv[++i];
+    else if (a === '--email-env') out.flags.emailEnv = argv[++i];
+    else if (a === '--password') out.flags.password = argv[++i];
+    else if (a === '--password-env') out.flags.passwordEnv = argv[++i];
+    else if (a === '--password-stdin') out.flags.passwordStdin = true;
+    else if (a === '--window') out.flags.window = argv[++i];
+    else if (a === '--profile') out.flags.profile = argv[++i];
+    else if (a === '--port') out.flags.port = Number(argv[++i]) || 0;
+    else if (a === '--no-remember') out.flags.noRemember = true;
+    else if (a === '--dry-run') out.flags.dryRun = true;
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
@@ -416,6 +460,32 @@ function tokenize(line) {
   return out;
 }
 
+// Credentials never come from argv by default: a value passed on the command
+// line lands in shell history and in every process listing on the machine.
+function readSecret(args, kind) {
+  const envName = args.flags[`${kind}Env`];
+  if (envName) {
+    const v = process.env[envName];
+    if (!v) throw Object.assign(new Error(`${envName} is empty or unset`), { code: 'EUSAGE' });
+    return v;
+  }
+  const direct = args.flags[kind];
+  if (direct) {
+    if (kind === 'password') {
+      console.error('⚠ --password puts the secret in shell history and in the process list,\n' +
+                    '  where any process running as you can read it. Prefer --password-env NAME.');
+    }
+    return direct;
+  }
+  return null;
+}
+
+async function readStdinSecret() {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString('utf8').split('\n')[0].trim();
+}
+
 async function runBatch(args) {
   const endpoint = {
     session: args.session, cdp: args.cdp, browser: args.browser,
@@ -504,6 +574,50 @@ async function main() {
     const p = readPos(args.session);
     if (args.json) return console.log(JSON.stringify(p ?? null));
     return console.log(p ? `${p.x},${p.y}` : 'unset (no gesture yet in this session)');
+  }
+
+  if (cmd === 'launch') {
+    const r = await launch({
+      url: rest[0], browser: args.browser || 'edge',
+      profile: args.flags.profile, port: args.flags.port ?? 0,
+      log: m => { if (!args.json) console.error(m); },
+    });
+    if (args.json) return console.log(JSON.stringify({ ok: true, command: 'launch', ...r }));
+    return console.log(
+      `✓ ${r.browser} up on port ${r.port}
+` +
+      `  profile ${r.profile}
+` +
+      `  next:   agent-hands snapshot --cdp ${r.port}
+` +
+      `          agent-hands login --cdp ${r.port} --email-env EMAIL --password-env PASSWORD`);
+  }
+
+  if (cmd === 'login') {
+    const email = readSecret(args, 'email');
+    const password = args.flags.passwordStdin ? await readStdinSecret() : readSecret(args, 'password');
+    if (!args.flags.dryRun && (!email || !password)) {
+      throw Object.assign(new Error([
+        'login needs an identifier and a password.',
+        '  safest:  agent-hands login --email-env EMAIL --password-env PASSWORD',
+        '  or:      echo "$PW" | agent-hands login --email you@example.com --password-stdin',
+        '  --dry-run inspects the form without typing anything.',
+      ].join('\n')), { code: 'EUSAGE' });
+    }
+    const r = await loginFlow({
+      windowMatch: args.flags.window || args.tab, email, password,
+      remember: !args.flags.noRemember, dryRun: args.flags.dryRun,
+      challengeWaitMs: (args.flags.challengeWait ?? 180) * 1000,
+      log: m => console.error('  ' + m),
+    });
+    if (r.state === 'challenge-unresolved') process.exitCode = 3;
+    if (args.json) {
+      return console.log(JSON.stringify({ ok: r.state !== 'challenge-unresolved', command: 'login', ...r }));
+    }
+    if (r.found) {
+      return console.log(`window: ${r.window}\n${r.found}` + (r.challenge ? `\n  challenge: ${r.challenge}` : ''));
+    }
+    return console.log(`✓ ${r.state}${r.window ? ' — ' + r.window : ''}`);
   }
 
   if (cmd === 'run') return runBatch(args);
