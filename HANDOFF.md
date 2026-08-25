@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.15.0. 0.15.1 is committed and not yet published.
+npm has 0.15.1, published 24 Aug 2026.
 
 ## The four rules the design rests on
 
