@@ -92,7 +92,11 @@ Windows, macOS and Linux. Any other Chromium build works with
 `--user-data-dir <path>`.
 
 `--tab` matches a title or url. An unmatched value lists what is open. Without
-it the visible tab wins.
+it the first command picks the visible tab and remembers it, so later commands
+return to that tab even after you switch away. `agent-hands tabs` shows which
+tab commands go to. `open` on an attached browser creates a new background tab,
+so the page you are reading is never navigated away; `--here` navigates the
+current tab instead.
 
 That endpoint serves no `/json/*` routes, so nothing can discover targets over
 HTTP. They are read over the browser websocket with `Target.getTargets` instead,

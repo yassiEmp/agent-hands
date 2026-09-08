@@ -247,8 +247,9 @@ not.
 
 ### When not to batch
 
-One connection means one tab. If the work needs to move between tabs, run a
-batch per tab. And if a step's input depends on reading the result of the
+One connection means one tab. `open` inside a batch on an attached browser
+moves the connection to the new tab it creates, so later lines run there. To
+work in an existing other tab, run a batch per tab with `--tab`. And if a step's input depends on reading the result of the
 previous step, you cannot pre-write the lines — do those interactively, then
 batch the deterministic run once you know the shape.
 

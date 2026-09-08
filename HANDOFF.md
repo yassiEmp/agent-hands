@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.15.1, published 24 Aug 2026.
+npm has 0.15.1, published 24 Aug 2026. 0.16.0 is committed and unpublished.
 
 ## The four rules the design rests on
 
@@ -74,6 +74,32 @@ npm has 0.15.1, published 24 Aug 2026.
   simply wrong. But `--force` is documented per-command and behaves as sticky,
   and the two cases cannot be told apart from the page: a clean browser
   started by `launch` carries the same shim.
+
+## Fixed in 0.16.0 (8 Sep 2026) — an agent navigated the user's YouTube tab
+
+Reported from a real session. `open` with no `--tab` navigated the tab the
+user was watching, and the next `snapshot` read a different tab after the
+user switched away. Three causes, three fixes:
+
+- The tab picker preferred the VISIBLE tab and re-ran on every command, so
+  the target followed the user's clicks. Now the first pick is written to
+  `~/.agent-browser/humanize/<key>.tab.json` and later commands return to it
+  while it exists. `--tab` overrides and becomes the new memory. `doctor`
+  prints how the tab resolved; `--json` carries `"tab"`.
+- `open` on the shared-socket path (a browser the user attached) now creates
+  a background tab with `Target.createTarget {background:true}` and moves the
+  connection to it. `--here` navigates in place. On a launched or pooled
+  browser it still navigates in place; `--new-tab` there is a usage error
+  because every page is its own socket on a classic endpoint.
+- `agent-hands tabs` lists tabs and marks the current one. Before, the only
+  way to see tabs was a deliberately wrong `--tab` value.
+
+Token cost, measured on a GitHub repo page with 92 refs: `snapshot --json`
+13330 -> 6512 chars by dropping x/y/w/h and null fields, which an agent never
+reads because `--ref` re-resolves at click time. Text 8060 -> 7106 by cutting
+href query strings, `type="button"` on buttons and long container excerpts.
+Remaining large outputs: `skills get core` ~4500 tokens per session and the
+USAGE text ~3100 tokens on any unknown command. Not touched.
 
 ## Known open, in priority order
 
