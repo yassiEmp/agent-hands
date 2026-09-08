@@ -548,11 +548,21 @@ const endpoint = { ...resolution.endpoint,
       case 'snapshot': {
         const snap = await capture(cdp, { max: args.flags.max ?? 300 });
         save(cdp.key, snap);
-        const refs = Object.entries(snap.refs).map(([ref, e]) => ({
-          ref, tag: e.tag, type: e.type, role: e.role, name: e.name,
-          x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.w), h: Math.round(e.h),
-          off: e.off, disabled: e.disabled,
-        }));
+        // Geometry and null fields were 61% of the JSON and an agent never
+        // reads them: --ref re-resolves position at click time. Only what is
+        // set is emitted.
+        const refs = Object.entries(snap.refs).map(([ref, e]) => {
+          const r = { ref, tag: e.tag };
+          if (e.type && !(e.tag === 'button' && e.type === 'button')) r.type = e.type;
+          if (e.role && !['button', 'link'].includes(e.role)) r.role = e.role;
+          if (e.name) r.name = e.name;
+          if (e.placeholder) r.placeholder = e.placeholder;
+          if (e.value) r.value = e.value;
+          if (e.off) r.off = true;
+          if (e.disabled) r.disabled = true;
+          if (e.selected) r.selected = true;
+          return r;
+        });
         const lh = loginHint(snap);
         if (lh) hint(args, lh);
         return {

@@ -151,6 +151,21 @@ export function load(key) {
   try { return JSON.parse(fs.readFileSync(refsFile(key), 'utf8')); } catch { return null; }
 }
 
+// What the agent reads, so every byte here is paid on every look at a page.
+// Measured on a GitHub repo page (92 refs): hrefs with query strings were a
+// third of the output, `type="button"` on a button says nothing, and a
+// container's 80-char text excerpt repeats what its children already show.
+// Geometry is never printed: --ref re-resolves it at click time.
+const STRUCTURAL_TAGS = new Set(['header', 'nav', 'main', 'footer', 'form', 'dialog', 'iframe', 'div', 'section']);
+const HREF_MAX = 48;
+
+function shortHref(href) {
+  const bare = href.replace(/[?#].*$/, '');
+  if (!bare) return href.length > HREF_MAX ? href.slice(0, HREF_MAX - 1) + '…' : href;
+  const cut = bare.length > HREF_MAX ? bare.slice(0, HREF_MAX - 1) + '…' : bare;
+  return bare === href ? cut : cut + (cut.endsWith('…') ? '' : '?…');
+}
+
 export function render(snap) {
   const lines = [];
   lines.push(`Page: ${snap.title || '(untitled)'}`);
@@ -160,15 +175,18 @@ export function render(snap) {
     + ` · ${n} refs${snap.truncated ? ' (truncated)' : ''}`);
   lines.push('');
   for (const [ref, e] of Object.entries(snap.refs)) {
-    const attrs = [e.type && `type="${e.type}"`, e.href && `href="${e.href}"`,
+    const showType = e.type && !(e.tag === 'button' && e.type === 'button');
+    const attrs = [showType && `type="${e.type}"`, e.href && `href="${shortHref(e.href)}"`,
                    e.role && !['button', 'link'].includes(e.role) && `role="${e.role}"`]
       .filter(Boolean).join(' ');
+    const name = STRUCTURAL_TAGS.has(e.tag) && e.name && e.name.length > 40
+      ? e.name.slice(0, 39) + '…' : e.name;
     const bits = [e.placeholder && `placeholder="${e.placeholder}"`,
                   e.value && `value="${e.value}"`,
                   e.disabled && 'disabled', e.selected && 'selected',
                   e.off && '↓ offscreen'].filter(Boolean).join(' ');
     lines.push(`${'  '.repeat(Math.min(e.depth, 6))}@${ref} [${e.tag}${attrs ? ' ' + attrs : ''}]`
-      + (e.name ? ` "${e.name}"` : ' (unnamed)') + (bits ? '  ' + bits : ''));
+      + (name ? ` "${name}"` : ' (unnamed)') + (bits ? '  ' + bits : ''));
   }
   return lines.join('\n');
 }
