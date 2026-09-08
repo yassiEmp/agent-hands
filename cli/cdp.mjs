@@ -161,6 +161,8 @@ export function devtoolsPort(session) {
   return resolveEndpoint({ session }).port;
 }
 
+import { recall as recallTab, remember as rememberTab } from './tab.mjs';
+
 export class CDP {
   constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); this.sessionId = null; }
 
@@ -174,10 +176,16 @@ export class CDP {
 
     const external = Boolean(opts.cdp || opts.browser || opts.userDataDir);
     const key = storeKey(opts);
-    const tag = cdp => Object.assign(cdp, { key, external });
+    // The chosen tab is written down so the next command returns to it instead
+    // of re-picking whatever the user is looking at by then. See tab.mjs.
+    const tag = cdp => {
+      Object.assign(cdp, { key, external, port });
+      if (cdp.targetId) rememberTab(key, { targetId: cdp.targetId, title: cdp.title, url: cdp.url });
+      return cdp;
+    };
 
     const targets = await listTargets(port);
-    if (targets) return tag(await CDP.attachPerPage(targets, opts.tab));
+    if (targets) return tag(await CDP.attachPerPage(targets, { ...opts, key }));
 
     if (!browserPath) {
       throw new Error(`no CDP endpoint on port ${port}. The browser may have exited.`);
@@ -197,18 +205,21 @@ export class CDP {
             `  start it: agent-browser --session ${opts.session} --profile "${profileDir(opts.session)}" open <url> --headed`)
       ), { code: 'ENOSESSION' });
     }
-    return tag(await CDP.attachFlat(port, browserPath, opts));
+    return tag(await CDP.attachFlat(port, browserPath, { ...opts, key }));
   }
 
   // Pre-existing path. One socket per page, no sessionId.
-  static async attachPerPage(targets, tab) {
-    const page = pickPage(targets, tab);
+  static async attachPerPage(targets, { tab, key } = {}) {
+    const page = pickPage(targets, tab, key);
     const cdp = await CDP.open(page.webSocketDebuggerUrl);
     // Anything that throws from here on must close the socket first. The caller
     // never received `cdp`, so nobody else can, and an open handle keeps the
     // event loop alive: the CLI prints its error and then hangs forever.
     try {
       cdp.url = page.url;
+      cdp.title = page.title;
+      cdp.targetId = page.id;
+      cdp.tabWhy = page.why;
       await enableFocusEmulation(cdp);
       await clearAutomationHint(cdp);
       return cdp;
@@ -224,7 +235,7 @@ export class CDP {
   // authorize every new CDP connection, so a per-invocation socket would ask
   // on every command. One daemon means one prompt per browser run.
   static async attachFlat(port, browserPath, opts = {}) {
-    const { tab, activate = true } = opts;
+    const { tab, activate = true, key } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
     // Always the daemon. There is deliberately no un-shared variant: a socket
     // that can authorise itself is a second door into a browser holding the
@@ -235,10 +246,12 @@ export class CDP {
     // used to print its error and hang until the caller killed it.
     try {
       const { targetInfos } = await cdp.send('Target.getTargets');
-      const page = await choosePage(cdp, targetInfos, { tab, activate });
+      const page = await choosePage(cdp, targetInfos, { tab, activate, key });
       cdp.sessionId = page.sessionId;
       cdp.targetId = page.targetId;   // refs bind to a tab, see snapshot.mjs
       cdp.url = page.url;
+      cdp.title = page.title;
+      cdp.tabWhy = page.why;
       await enableFocusEmulation(cdp);
       await clearAutomationHint(cdp);
       return cdp;
@@ -533,8 +546,13 @@ async function listTargets(port) {
   }
 }
 
-function pickPage(targets, tab) {
+function pickPage(targets, tab, key) {
   const pages = targets.filter(t => t.type === 'page');
+  if (!tab && key) {
+    const was = recallTab(key);
+    const hit = was && pages.find(t => t.id === was.targetId);
+    if (hit) return { ...hit, why: 'remembered' };
+  }
   // --tab used to be honoured only on the flat path, so on a classic endpoint
   // it was silently dropped and the command ran against whatever tab came
   // first. A flag that is quietly ignored is worse than one that errors.
@@ -547,11 +565,11 @@ function pickPage(targets, tab) {
         pages.map(t => `  ${(t.title || '').slice(0, 48).padEnd(48)}  ${t.url.slice(0, 60)}`).join('\n')
       ), { code: 'EUSAGE' });
     }
-    return hit;
+    return { ...hit, why: 'match' };
   }
   const page = pages.find(t => !/^(chrome|edge|devtools):/.test(t.url)) || pages[0];
   if (!page) throw new Error('no page target found. Open a tab first.');
-  return page;
+  return { ...page, why: 'first' };
 }
 
 const INTERNAL = /^(chrome|edge|devtools|about|brave|vivaldi):/;
@@ -576,12 +594,20 @@ async function tabState(cdp, sessionId) {
 // returns without thawing it and Emulation.setFocusEmulationEnabled hangs.
 // Activating steals the user's foreground, so put it back straight after: a
 // woken tab keeps answering once it is hidden again.
-async function choosePage(cdp, targets, { tab, activate }) {
+async function choosePage(cdp, targets, { tab, activate, key }) {
   const pages = targets.filter(t => t.type === 'page');
   if (!pages.length) throw new Error('no page target found. Open a tab first.');
 
+  // Memory beats visibility. The visible tab is whatever the user is looking
+  // at, which changes under the agent between two commands; the remembered
+  // tab is the one this CLI drove last, which is what the agent means.
+  const was = !tab && key ? recallTab(key) : null;
+  const remembered = was && pages.find(p => p.targetId === was.targetId);
+  let why = tab ? 'match' : remembered ? 'remembered' : 'visible';
+
   const wanted = tab
     ? pages.filter(p => `${p.title} ${p.url}`.toLowerCase().includes(tab.toLowerCase()))
+    : remembered ? [remembered]
     : pages.filter(p => !INTERNAL.test(p.url));
   if (tab && !wanted.length) {
     throw new Error(
@@ -604,7 +630,10 @@ async function choosePage(cdp, targets, { tab, activate }) {
 
   const live = wantedProbed.find(p => p.state === 'visible')
     || wantedProbed.find(p => p.state === 'hidden');
-  if (live) return live;
+  if (live) {
+    if (why === 'visible' && live.state === 'hidden') why = 'hidden';
+    return { ...live, why };
+  }
 
   const target = wantedProbed[0];
   const name = (target.title || target.url).slice(0, 48);
@@ -622,7 +651,42 @@ async function choosePage(cdp, targets, { tab, activate }) {
     await cdp.send('Target.activateTarget', { targetId: visibleNow.targetId });
   }
   if (woken === 'frozen') throw new Error(`"${name}" stayed frozen after being activated.`);
-  return target;
+  return { ...target, why: `${why}, woken` };
+}
+
+// A new background tab, so the page the user is reading stays where it is.
+// Flat path only: on a classic endpoint every page is its own socket and
+// switching would mean reconnecting, which the caller does not expect.
+export async function newTab(cdp, url) {
+  if (!cdp.sessionId) {
+    throw Object.assign(new Error(
+      'a new tab needs the shared-socket endpoint (a browser you attached to).\n' +
+      '  On this browser use: agent-hands open <url> --here'), { code: 'EUSAGE' });
+  }
+  const { targetId } = await cdp.send('Target.createTarget', { url, background: true }, null);
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true }, null);
+  cdp.sessionId = sessionId;
+  cdp.targetId = targetId;
+  cdp.url = url;
+  cdp.title = '';
+  cdp.tabWhy = 'new';
+  await enableFocusEmulation(cdp);
+  await clearAutomationHint(cdp);
+  rememberTab(cdp.key, { targetId, title: '', url });
+  return targetId;
+}
+
+// Every page tab, with the one commands currently go to marked.
+export async function listTabs(cdp) {
+  let pages;
+  if (cdp.sessionId) {
+    const { targetInfos } = await cdp.send('Target.getTargets', {}, null);
+    pages = targetInfos.filter(t => t.type === 'page').map(t => ({ id: t.targetId, title: t.title, url: t.url }));
+  } else {
+    const all = (await listTargets(cdp.port)) ?? [];
+    pages = all.filter(t => t.type === 'page').map(t => ({ id: t.id, title: t.title, url: t.url }));
+  }
+  return pages.map(p => ({ ...p, current: p.id === cdp.targetId }));
 }
 
 // Ground truth about the running browser. Browser.getVersion works on both

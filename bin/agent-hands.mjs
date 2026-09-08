@@ -6,7 +6,8 @@
 
 import { readFileSync, createReadStream } from 'node:fs';
 import readline from 'node:readline';
-import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint } from '../cli/cdp.mjs';
+import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint, newTab, listTabs } from '../cli/cdp.mjs';
+import { renderTabs } from '../cli/tab.mjs';
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
@@ -55,7 +56,8 @@ COMMANDS
   snapshot [--max <n>]        ref-labelled tree of what is on the page
   text [selector]             read visible text (default: body)
   challenge                   is an anti-bot challenge blocking this page?
-  open <url>                  navigate this tab and wait for load
+  tabs                        list tabs; > marks the one commands go to
+  open <url>                  attached browser: new background tab. --here: this tab
   click --ref @e12            target a snapshot ref — most robust, works in iframes
   click <selector>            target a CSS selector
   click --text "Label"        target by visible text (ranked, best match wins)
@@ -78,7 +80,8 @@ OPTIONS
   --browser <name>   a browser you launched yourself, see below
   --user-data-dir <path>  any other Chromium build
   --cdp <port|url>   an explicit endpoint, or $AGENT_HANDS_CDP
-  --tab <match>      choose the tab by title or url
+  --tab <match>      choose the tab by title or url; remembered for later commands
+  --here             open: navigate the current tab instead of a new one
   --no-activate      never bring a frozen tab to the front; error instead
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
   --pause-on-challenge   stop on an anti-bot challenge and wait for the human
@@ -102,10 +105,14 @@ YOUR OWN BROWSER
   and the approval cannot be persisted, so one background relay holds the single
   socket: you approve once per browser run, not once per command.
 
-  A hidden tab is driven in place and keeps your foreground. A tab frozen by
-  the browser's memory saver cannot answer at all; it is woken by bringing it
-  forward for a moment, then your previous tab is restored. --no-activate turns
-  that into an error.
+  WHICH TAB. The first command picks the visible tab and REMEMBERS it, so
+  later commands return to that tab even after the user switches away. --tab
+  picks another and becomes the new memory. "agent-hands tabs" shows the pick.
+  "open" on an attached browser creates a new background tab, so the page the
+  user is reading is never navigated away. --here navigates the current tab.
+  A hidden tab is driven where it is. A tab frozen by the browser's memory
+  saver cannot answer; it is woken by bringing it forward for a moment, then
+  your previous tab is restored. --no-activate turns that into an error.
 
   \`agent-hands snapshot\` works here and mints its own refs, stored per browser,
   so --ref works on your own browser too. Refs are bound to the tab they came
@@ -273,6 +280,8 @@ function parseArgs(argv) {
     else if (a === '--user-data-dir') out.userDataDir = argv[++i];
     else if (a === '--tab') out.tab = argv[++i];
     else if (a === '--no-activate') out.activate = false;
+    else if (a === '--here') out.flags.here = true;
+    else if (a === '--new-tab') out.flags.newTab = true;
     else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
     else if (a === '--text') out.flags.text = argv[++i];
     else if (a === '--ref') out.flags.ref = argv[++i];
@@ -315,11 +324,19 @@ function parseArgs(argv) {
 }
 
 const CHALLENGE_WAIT_DEFAULT = 180000;
+const TAB_WHY = {
+  remembered: 'the tab this CLI drove last (remembered)',
+  visible: 'the visible tab, now remembered for later commands',
+  hidden: 'a hidden tab, now remembered for later commands',
+  match: 'matched --tab, now remembered',
+  first: 'the first page, now remembered',
+  new: 'a new background tab',
+};
 // doctor is a diagnostic and must still answer on a login page; challenge is
 // how you inspect one safely; login never attaches in the first place.
-const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where']);
+const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs']);
 
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
@@ -346,6 +363,7 @@ const endpoint = { ...resolution.endpoint,
       url: cdp.url, cursor: readPos(session),
       title: await cdp.evaluate('document.title'),
       viewport: await cdp.evaluate('innerWidth + "x" + innerHeight'),
+      tab: cdp.tabWhy ?? null,
     };
     if (!shared) { await cdp.drain(); cdp.close(); }
     const warn = out.headless
@@ -355,6 +373,7 @@ const endpoint = { ...resolution.endpoint,
     return {
       data: out,
       human: `✓ ${label} ready [${args._via}] — ${out.title || '(untitled)'} @ ${out.url}\n`
+        + (out.tab ? `  tab: ${TAB_WHY[out.tab] ?? out.tab}\n` : '')
         + `  ${out.profile ? `profile ${out.profile}` : 'external browser — you launched it, not agent-browser'}\n`
         + `  browser ${out.browser}  port ${out.port}  viewport ${out.viewport}`
         + `  cursor ${out.cursor ? `${out.cursor.x},${out.cursor.y}` : 'unset'}${warn}`,
@@ -467,7 +486,16 @@ const endpoint = { ...resolution.endpoint,
       case 'open': {
         const url = rest[0];
         if (!url) throw Object.assign(new Error('open needs a url'), { code: 'EUSAGE' });
-        await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
+        // On a browser the user is working in, the picked tab is theirs: it
+        // held whatever they were reading. Navigating it in place took a
+        // YouTube tab away from the user (8 Sep 2026). So a fresh background
+        // tab is the default there. --here navigates in place, --tab picks one.
+        // A browser this CLI launched has nothing to protect, so in place.
+        const attached = Boolean(cdp.sessionId);
+        const inPlace = args.flags.here || Boolean(args.tab) || (!attached && !args.flags.newTab);
+        const replaced = inPlace ? { title: cdp.title, url: cdp.url } : null;
+        if (inPlace) await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
+        else await newTab(cdp, url);
         // Settle before returning: an agent that snapshots immediately would
         // otherwise capture the old page and mint refs that cannot resolve.
         let now = '';
@@ -477,6 +505,10 @@ const endpoint = { ...resolution.endpoint,
           if (String(now).startsWith('complete')) break;
         }
         const href = String(now).split('|')[1] || url;
+        const tabNote = inPlace
+          ? `in place, replaced "${(replaced.title || replaced.url || '').slice(0, 40)}"`
+          : 'new background tab';
+        const tab = inPlace ? 'here' : 'new';
 
         if (args.flags.pauseOnChallenge) {
           const v = await checkChallenge(cdp);
@@ -494,11 +526,17 @@ const endpoint = { ...resolution.endpoint,
                 `  Clear it in the browser, then re-run. Nothing was bypassed.`
               ), { code: 'ECHALLENGE' });
             }
-            return { data: { url: href, challenge: { vendor: v.blocking.map(b => b.vendor), cleared: true } },
-                     human: `✓ open ${href}  (challenge cleared by you)` };
+            return { data: { url: href, tab, challenge: { vendor: v.blocking.map(b => b.vendor), cleared: true } },
+                     human: `✓ open ${href}  [${tabNote}]  (challenge cleared by you)` };
           }
         }
-        return { data: { url: href }, human: `✓ open ${href}` };
+        return { data: { url: href, tab }, human: `✓ open ${href}  [${tabNote}]` };
+      }
+
+      case 'tabs': {
+        const tabs = await listTabs(cdp);
+        return { data: { count: tabs.length, tabs: tabs.map(t => ({ title: t.title, url: t.url, current: t.current })) },
+                 human: renderTabs(tabs) + '\n\n  > marks the tab commands go to.  --tab <match> picks another.' };
       }
 
       case 'challenge': {
@@ -536,7 +574,7 @@ const endpoint = { ...resolution.endpoint,
 
 // Read-only verbs emit no input event, so no site can observe their timing and
 // nothing needs pacing before them.
-const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where']);
+const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs']);
 
 // A batch line is just CLI arguments. That is the whole design: an agent that
 // can use this CLI can already write a batch, and every verb added later works
