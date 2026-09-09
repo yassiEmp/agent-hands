@@ -71,9 +71,12 @@ export async function clickAt(cdp, session, to, width, speed) {
     x: Math.round(to.x), y: Math.round(to.y),
     button: 'left', clickCount: 1, pointerType: 'mouse',
   };
-  cdp.fire('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', timestamp: Date.now() / 1000 });
+  // buttons is the bitmask a pointerdown handler reads. Without it Chrome
+  // reports buttons:0 on the press, and an app that checks event.buttons
+  // sees a press with no button down. Figma's "New file" ignored exactly that.
+  cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 1, type: 'mousePressed', timestamp: Date.now() / 1000 });
   await sleep(lognormal(72, 0.35, 200)); // button dwell
-  cdp.fire('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', timestamp: Date.now() / 1000 });
+  cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 0, type: 'mouseReleased', timestamp: Date.now() / 1000 });
   return move;
 }
 
@@ -85,11 +88,11 @@ export async function dragTo(cdp, session, from, to, width, speed) {
   await moveTo(cdp, session, from, width, speed);
   await sleep(lognormal(90, 0.45, 320));
   const at = p => ({ x: Math.round(p.x), y: Math.round(p.y), button: 'left', clickCount: 1, pointerType: 'mouse' });
-  cdp.fire('Input.dispatchMouseEvent', { ...at(from), type: 'mousePressed', timestamp: Date.now() / 1000 });
+  cdp.fire('Input.dispatchMouseEvent', { ...at(from), buttons: 1, type: 'mousePressed', timestamp: Date.now() / 1000 });
   await sleep(lognormal(110, 0.35, 300)); // the hand settles before it pulls
   const move = await moveTo(cdp, session, to, width, speed, { held: true });
   await sleep(lognormal(80, 0.4, 260));
-  cdp.fire('Input.dispatchMouseEvent', { ...at(to), type: 'mouseReleased', timestamp: Date.now() / 1000 });
+  cdp.fire('Input.dispatchMouseEvent', { ...at(to), buttons: 0, type: 'mouseReleased', timestamp: Date.now() / 1000 });
   return move;
 }
 
@@ -273,12 +276,34 @@ export function finderFor({ selector, text, label } = {}) {
   return `document.querySelector(${JSON.stringify(selector ?? '')})`;
 }
 
-const BOX = `(el => {
+// The box, and what a press at its centre would actually hit. A modal
+// backdrop, a cookie banner or a drawer sits above the target and takes the
+// press; the click then reports success and nothing happened. Measured on
+// Figma, 9 Sep 2026: every click for twelve invocations landed on a tinted
+// modal background. So the element under the aim point is reported too.
+export const BOX = `(el => {
   if (!el) return null;
   el.scrollIntoView({ block: 'center', behavior: 'instant' });
   const r = el.getBoundingClientRect();
-  return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height, tag: el.tagName };
+  const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+  const top = document.elementFromPoint(cx, cy);
+  const covered = top && top !== el && !el.contains(top) && !top.contains(el);
+  const label = n => n.tagName.toLowerCase() + (n.id ? '#' + n.id : '')
+    + (typeof n.className === 'string' && n.className ? '.' + n.className.trim().split(/\\s+/).slice(0, 2).join('.') : '')
+    + ((n.innerText || '').trim() ? ' "' + (n.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 40) + '"' : '');
+  return { x: cx, y: cy, w: r.width, h: r.height, tag: el.tagName, coveredBy: covered ? label(top) : null };
 })`;
+
+export function refuseCovered(box, what, force) {
+  if (!box || !box.coveredBy || force) return;
+  const err = new Error(
+    `${what} is covered by ${box.coveredBy}.\n` +
+    `  A press there hits the cover, not the target, and the click does nothing.\n` +
+    `  A dialog or banner is probably open: press Escape, or click the cover's button.\n` +
+    `  --force clicks through anyway.`);
+  err.code = 'ECOVERED';
+  throw err;
+}
 
 // Resolve an agent-browser snapshot ref (@e12) by asking agent-browser for its
 // box. Refs carry frame context, so this reaches inside cross-origin iframes
@@ -334,7 +359,7 @@ export function resolveRef(session, ref) {
   };
 }
 
-export async function resolveTarget(cdp, { selector, text, label }) {
+export async function resolveTarget(cdp, { selector, text, label, force = false }) {
   if (label) {
     const names = await cdp.evaluate(`${LABELLED}(${JSON.stringify(label.toLowerCase())}).names`);
     if (names) {
@@ -357,6 +382,7 @@ export async function resolveTarget(cdp, { selector, text, label }) {
     err.code = 'ENOTFOUND';
     throw err;
   }
+  refuseCovered(box, label ? `label "${label}"` : text ? `text "${text}"` : `"${selector}"`, force);
   // Aim off-centre. Humans do not hit the exact middle of a button.
   return {
     x: box.x + rand(-box.w / 5, box.w / 5),

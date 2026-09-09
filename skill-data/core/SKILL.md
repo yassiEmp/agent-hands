@@ -393,6 +393,18 @@ Set `AGENT_HANDS_SESSION=work` once and omit `--session` from every call.
 
 ## Rules that prevent the common failures
 
+**A click that reports "covered by ..." hit a dialog, banner or backdrop, and
+did nothing.** Exit 8. The message names the cover and its first words. Read
+them: a paywall, a cookie banner and a confirm box each want a different
+answer. Press Escape or click the cover's own button, then retry. Without
+this check a press lands on the backdrop, the release lands on the target,
+and the tool would report success for a click that never fired. Measured on
+Figma, 9 Sep 2026: twelve invocations lost to one modal.
+
+**Some apps ignore input while their tab is hidden.** `agent-hands front`
+brings the tab forward. It takes the user's foreground, so use it only after
+a click that did nothing on a page with no cover.
+
 0. **Inside an iframe, use `--ref`.** CSS selectors and `--text` are evaluated
    in page JS, which cannot cross a cross-origin frame boundary. Snapshot refs
    carry frame context and reach inside. `--ref` scrolls the element into view

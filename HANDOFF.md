@@ -117,7 +117,19 @@ to teach. Results, 9 Sep 2026:
   drawing was ONE batch of 12 lines, 5 invocations in all. No doc issue
   reported. It could not verify the canvas from the DOM; a screenshot verb
   is the next gap for canvas apps.
-Figma and Google Sheets come next, on the owner's account.
+Account trials, 9 Sep 2026, on the owner's Edge:
+- Google Sheets: done in 14 invocations, sheet renamed. The A4 value was
+  inferred, never read: Sheets draws cells on a canvas and the DOM holds
+  only the formula bar. Eight invocations went to trying to read one cell.
+- Figma: blocked. The Starter plan is at its 3-file limit, so "New Design
+  file" opens a paywall modal. Every later click pressed on the backdrop
+  (closing it) and released on the button, and the tool reported success.
+  Fix: BOX now reports elementFromPoint at the aim, and click refuses with
+  ECOVERED (exit 8) naming the cover and its first words. --force clicks
+  through. `front` (Target.activateTarget) was added for apps that ignore a
+  hidden tab; Figma was not one of them.
+Next gap, common to Excalidraw and Sheets: a screenshot verb so a canvas can
+be checked by looking.
 
 ## Fixed in 0.16.0 (8 Sep 2026) — an agent navigated the user's YouTube tab
 

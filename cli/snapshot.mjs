@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { scrollBy } from './gestures.mjs';
+import { scrollBy, refuseCovered } from './gestures.mjs';
 
 const STATE = path.join(os.homedir(), '.agent-browser', 'humanize');
 const refsFile = key => path.join(STATE, `${key}.refs.json`);
@@ -207,11 +207,17 @@ const RELOCATE = (p, sel, tag) => `(() => {
   if (!ok(el)) el = document.querySelector(${JSON.stringify(sel)});
   if (!ok(el)) return null;
   const r = el.getBoundingClientRect();
-  return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2,
-                          w: r.width, h: r.height, tag: el.tagName, vh: innerHeight });
+  const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+  const top = document.elementFromPoint(cx, cy);
+  const covered = top && top !== el && !el.contains(top) && !top.contains(el);
+  const label = n => n.tagName.toLowerCase() + (n.id ? '#' + n.id : '')
+    + (typeof n.className === 'string' && n.className ? '.' + n.className.trim().split(/\\s+/).slice(0, 2).join('.') : '')
+    + ((n.innerText || '').trim() ? ' "' + (n.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 40) + '"' : '');
+  return JSON.stringify({ x: cx, y: cy, w: r.width, h: r.height, tag: el.tagName, vh: innerHeight,
+                          coveredBy: covered ? label(top) : null });
 })()`;
 
-export async function locate(cdp, key, ref, { speed = 1 } = {}) {
+export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   const snap = load(key);
   const id = String(ref).replace(/^@/, '');
   if (!snap) {
@@ -232,6 +238,7 @@ export async function locate(cdp, key, ref, { speed = 1 } = {}) {
     await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed);
     box = await read(cdp, e) || box;
   }
+  refuseCovered(box, `@${id} ("${e.name || e.tag}")`, force);
   return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag };
 }
 

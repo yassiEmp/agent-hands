@@ -62,6 +62,7 @@ COMMANDS
   expect <condition>          fail now unless the page shows it
   if <condition> <command>    run the command only when it holds now
   tabs                        list tabs; > marks the one commands go to
+  front                       bring the tab forward; some apps ignore a hidden tab
   open <url>                  attached browser: new background tab. --here: this tab
   click --ref @e12            target a snapshot ref — most robust, works in iframes
   click <selector>            target a CSS selector
@@ -399,9 +400,9 @@ const TAB_WHY = {
 };
 // doctor is a diagnostic and must still answer on a login page; challenge is
 // how you inspect one safely; login never attaches in the first place.
-const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect']);
+const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect', 'front']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill', 'drag']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect', 'front']);
 
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
@@ -475,9 +476,9 @@ const endpoint = { ...resolution.endpoint,
     const target = hasXY
       ? { x: args.flags.x, y: args.flags.y, w: 12, h: 12, tag: 'XY' }
       : args.flags.ref
-        ? (cdp.external ? await locate(cdp, cdp.key, args.flags.ref, { speed })
+        ? (cdp.external ? await locate(cdp, cdp.key, args.flags.ref, { speed, force: args.flags.force })
                         : resolveRef(session, args.flags.ref))
-      : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text, label: args.flags.label }) : null);
+      : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text, label: args.flags.label, force: args.flags.force }) : null);
     const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
 
     switch (cmd) {
@@ -631,6 +632,17 @@ const endpoint = { ...resolution.endpoint,
                  human: `✓ ${cmd} ${describeCondition(c)}${r.waitedMs > 300 ? `  (${(r.waitedMs / 1000).toFixed(1)}s)` : ''}` };
       }
 
+      // Some apps ignore input while their tab is hidden. Bringing the tab
+      // forward is the only fix, and it takes the user's foreground, so it is
+      // a verb the agent chooses, never something a click does on its own.
+      case 'front': {
+        if (!cdp.targetId) throw Object.assign(new Error('front needs a tab id; this endpoint gave none.'), { code: 'EUSAGE' });
+        await cdp.send('Target.activateTarget', { targetId: cdp.targetId }, null);
+        await sleep(300);
+        const vis = await cdp.evaluate('document.visibilityState');
+        return { data: { visibility: vis }, human: `✓ front — tab is ${vis}` };
+      }
+
       case 'tabs': {
         const tabs = await listTabs(cdp);
         return { data: { count: tabs.length, tabs: tabs.map(t => ({ title: t.title, url: t.url, current: t.current })) },
@@ -669,7 +681,7 @@ const endpoint = { ...resolution.endpoint,
 
 // Read-only verbs emit no input event, so no site can observe their timing and
 // nothing needs pacing before them.
-const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs', 'wait', 'expect']);
+const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs', 'wait', 'expect', 'front']);
 
 // A batch line is just CLI arguments. That is the whole design: an agent that
 // can use this CLI can already write a batch, and every verb added later works
@@ -1480,7 +1492,7 @@ async function main() {
 
 // 3 is its own code so a caller can tell "a human needs to click something"
 // apart from a real failure, and retry instead of giving up.
-const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWAIT: 7 };
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWAIT: 7, ECOVERED: 8 };
 
 main().catch(err => {
   if (process.argv.includes('--json')) {
