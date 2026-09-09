@@ -245,13 +245,83 @@ no input event, so nothing can observe their timing and they are never paced.
 That is why a batch of reads runs at full speed while a batch of clicks does
 not.
 
+### Write the flow before you see the page
+
+Three verbs let a batch pause and branch on the page, so you write the whole
+flow in one turn instead of snapshotting after every step. They take the same
+target words as `click`: a selector, `--text`, or `--label`.
+
+```
+wait --text "Saved"                 text is on the page
+wait --gone --text "Loading"        text has left the page
+wait --enabled --text "Submit"      control is clickable; also --enabled "#id"
+wait --url /dashboard               path starts with this; no "/" = any part of the url
+wait --settled                      nothing changed for 500 ms
+wait --text "Saved" --timeout 30    default 15 s
+expect --url /dashboard             read once; stop the batch if false
+if --text "Accept cookies" click --text "Accept"    run only if true now
+```
+
+A login, first visit, one turn:
+
+```bash
+printf '%s\n' \
+  'open https://app.example.com/login' \
+  'wait --text "Email"' \
+  'if --text "Accept cookies" click --text "Accept"' \
+  'fill --label "Email" "me@example.com"' \
+  'fill --label "Password" "…"' \
+  'press Enter' \
+  'wait --url /dashboard --timeout 30' \
+  'expect --text "Welcome"' \
+  'snapshot --max 40' \
+  | agent-hands run
+```
+
+`--label` finds a form field by the words next to it, so no snapshot is
+needed to name it. Two fields with the same label is an error that lists
+both, never a guess.
+
+A failed `wait` or `expect` stops the batch with exit 7 and carries
+`"page": {title, url, refs}`, a 40-ref snapshot that is already saved. The
+next command can use `--ref` from it without another snapshot. Plan the fix
+from that line.
+
+Waiting is reads only. The site sees no input while the batch polls, and a
+wait that actually waited ends with a human reaction pause before the next
+input. Never add your own sleeps to look human. The tool owns the pacing.
+
+### Two patterns that need no model turn between steps
+
+**Generate, then pipe.** Your script prints the lines; `run` executes them on
+one connection. For forty cells, forty lines, one process.
+
+```python
+import subprocess
+lines = [f'fill --label "Row {i}" "{v}"' for i, v in enumerate(values)]
+subprocess.run(['agent-hands', 'run'], input='\n'.join(lines), text=True)
+```
+
+**Read, compute, write.** One batch reads, your code decides, one batch
+writes. Each `run` returns NDJSON you parse.
+
+```js
+import { execFileSync } from 'node:child_process';
+const run = lines => execFileSync('agent-hands', ['run'], { input: lines.join('\n') })
+  .toString().trim().split('\n').map(JSON.parse);
+const [total] = run(['text "#total"']);
+if (Number(total.text) > 100) run(['click --text "Apply discount"', 'wait --gone --text "Applying"']);
+```
+
+When the next step depends on the last result and the logic is small, call
+the CLI per step from the script. Each call costs about 150 ms, under human
+reaction time, and the site sees nothing unusual.
+
 ### When not to batch
 
 One connection means one tab. `open` inside a batch on an attached browser
 moves the connection to the new tab it creates, so later lines run there. To
-work in an existing other tab, run a batch per tab with `--tab`. And if a step's input depends on reading the result of the
-previous step, you cannot pre-write the lines — do those interactively, then
-batch the deterministic run once you know the shape.
+work in an existing other tab, run a batch per tab with `--tab`.
 
 ## When to use which tool
 

@@ -192,6 +192,38 @@ const RESOLVER = `(t => {
             .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
 })`;
 
+// A form field by the words next to it. Labels are what a human reads, so a
+// batch written before the page is seen can still name the right box. Exact
+// match beats contains; two equal candidates is an error, never a guess.
+const LABELLED = `(t => {
+  const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const CTRL = 'input,textarea,select,[contenteditable],[role=textbox],[role=combobox]';
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const hits = new Map();
+  const add = (e, name) => { if (e && vis(e) && !hits.has(e)) hits.set(e, name); };
+  for (const l of document.querySelectorAll('label')) {
+    const n = norm(l.innerText);
+    if (!n.includes(t)) continue;
+    add(l.control || (l.htmlFor && document.getElementById(l.htmlFor)) || l.querySelector(CTRL), n);
+  }
+  for (const e of document.querySelectorAll(CTRL)) {
+    const n = norm(e.getAttribute('aria-label') || e.placeholder || e.name);
+    if (n && n.includes(t)) add(e, n);
+  }
+  const all = [...hits.entries()];
+  const exact = all.filter(([, n]) => n === t);
+  const best = exact.length ? exact : all;
+  return { el: best[0]?.[0] || null, names: best.length > 1 ? best.map(([, n]) => n.slice(0, 40)) : null };
+})`;
+
+// The page-side expression that yields the element a target names. Shared by
+// click, fill and wait so "the same target as click" is literally true.
+export function finderFor({ selector, text, label } = {}) {
+  if (label) return `${LABELLED}(${JSON.stringify(label.toLowerCase())}).el`;
+  if (text) return `${RESOLVER}(${JSON.stringify(text.toLowerCase())})`;
+  return `document.querySelector(${JSON.stringify(selector ?? '')})`;
+}
+
 const BOX = `(el => {
   if (!el) return null;
   el.scrollIntoView({ block: 'center', behavior: 'instant' });
@@ -253,14 +285,22 @@ export function resolveRef(session, ref) {
   };
 }
 
-export async function resolveTarget(cdp, { selector, text }) {
-  const finder = text
-    ? `${RESOLVER}(${JSON.stringify(text.toLowerCase())})`
-    : `document.querySelector(${JSON.stringify(selector)})`;
-  const box = await cdp.evaluate(`${BOX}(${finder})`);
+export async function resolveTarget(cdp, { selector, text, label }) {
+  if (label) {
+    const names = await cdp.evaluate(`${LABELLED}(${JSON.stringify(label.toLowerCase())}).names`);
+    if (names) {
+      const err = new Error(
+        `label "${label}" matches ${names.length} fields:\n` +
+        names.map(n => `  "${n}"`).join('\n') +
+        `\n  Use the full label, a selector, or --ref from: agent-hands snapshot`);
+      err.code = 'EUSAGE';
+      throw err;
+    }
+  }
+  const box = await cdp.evaluate(`${BOX}(${finderFor({ selector, text, label })})`);
 
   if (!box) {
-    const what = text ? `text "${text}"` : `selector "${selector}"`;
+    const what = label ? `label "${label}"` : text ? `text "${text}"` : `selector "${selector}"`;
     const err = new Error(
       `no element matched ${what}.\n` +
       `  hint: run \`agent-hands snapshot\` to see what is on the page.`

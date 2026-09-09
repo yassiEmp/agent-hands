@@ -6,6 +6,7 @@
 
 import { readFileSync, createReadStream } from 'node:fs';
 import readline from 'node:readline';
+import { Readable } from 'node:stream';
 import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint, newTab, listTabs } from '../cli/cdp.mjs';
 import { renderTabs } from '../cli/tab.mjs';
 import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
@@ -23,6 +24,7 @@ import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { loginFlow } from '../cli/login.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
+import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
 
 // Read from the manifest. A hardcoded constant drifted from package.json twice
 // and npm rejected the publish as a duplicate both times.
@@ -56,6 +58,9 @@ COMMANDS
   snapshot [--max <n>]        ref-labelled tree of what is on the page
   text [selector]             read visible text (default: body)
   challenge                   is an anti-bot challenge blocking this page?
+  wait <condition>            pause until the page shows it - see help --batch
+  expect <condition>          fail now unless the page shows it
+  if <condition> <command>    run the command only when it holds now
   tabs                        list tabs; > marks the one commands go to
   open <url>                  attached browser: new background tab. --here: this tab
   click --ref @e12            target a snapshot ref — most robust, works in iframes
@@ -65,6 +70,7 @@ COMMANDS
   hover <selector>            move onto the element, no click
   move --xy <x> <y>           move only
   fill <target> "text"        click, select all, replace. --append to keep old text
+  fill --label "Email" "x"    target a form field by its label, no snapshot needed
   type "text"                 type into whatever has focus
   press <Key> [--times n]     ${Object.keys(KEYS).join(' ')}
   scroll <pixels>             negative scrolls up
@@ -154,9 +160,12 @@ STATE  (stop retyping the target)
   parallel sweep; replacing another writer's fresh pin prints a warning saying
   exactly this.
 
-BATCH  (use this for anything more than 2-3 steps)
+BATCH  (use this for anything more than 2-3 steps; full guide: help --batch)
   Every command pays a process start and a connect. "run" pays both once and
-  streams NDJSON results, one per line, in order.
+  streams NDJSON results, one per line, in order. wait / if / expect let you
+  write the whole flow before seeing the page, so one turn does the work of
+  five. A failed line carries a compact snapshot of the page, so the fix can be
+  planned without another look.
 
     printf '%s\n' 'open https://example.com' 'snapshot' 'text h1' \
       | agent-hands run --browser edge
@@ -270,6 +279,52 @@ EXAMPLES
   agent-hands press Backspace --times 20
   agent-hands scroll 600 --json`;
 
+const BATCH_HELP = `agent-hands run — write the whole flow once
+
+  printf '%s\\n' \\
+    'open https://app.example.com/login' \\
+    'wait --text "Email"' \\
+    'if --text "Accept cookies" click --text "Accept"' \\
+    'fill --label "Email" "me@example.com"' \\
+    'fill --label "Password" "…"' \\
+    'press Enter' \\
+    'wait --url /dashboard --timeout 30' \\
+    'expect --text "Welcome"' \\
+    'snapshot --max 40' \\
+    | agent-hands run
+
+CONDITIONS  (same target words as click: a selector, --text, --label)
+  --text "Saved"                 text is on the page
+  --gone --text "Loading"        text has left the page
+  --enabled --text "Submit"      control is clickable; also --enabled "#id"
+  --url /dashboard               path starts with this; "x.com/a" any part of the url
+  --settled                      nothing changed for 500 ms
+
+  wait <condition> [--timeout s]   poll every 200 ms, default 15 s. Reads only:
+                                   the site sees no input. A wait that waited
+                                   ends with a human reaction pause.
+  expect <condition>               read once; stop the batch if false
+  if <condition> <command>         read once; run the command only if true
+
+WHAT COMES BACK
+  One JSON line per input line, in order. A failed wait or expect carries
+  "page": {title, url, refs} — a 40-ref snapshot, already saved, so the next
+  command can use --ref without another snapshot. Exit 7 means a wait or
+  expect failed; the batch stops there.
+
+TWO PATTERNS THAT NEED NO MODEL TURN BETWEEN STEPS
+  Generate, then pipe. A script prints lines; run executes them once.
+    python gen.py | agent-hands run
+  Read, compute, write. One batch reads, your code decides, one batch writes.
+    agent-hands run <<< 'text "#total"' → parse → agent-hands run <<< 'fill ...'
+  Inside a script call the CLI per step when the next step depends on the
+  last result. Each call costs ~150 ms, under human reaction time.
+
+PACING IS NOT YOURS TO WRITE
+  Never sleep between lines to look human. The tool inserts lognormal gaps
+  between inputs and a reaction pause after each wait. Adding your own delays
+  only slows the batch.`;
+
 function parseArgs(argv) {
   const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -284,6 +339,12 @@ function parseArgs(argv) {
     else if (a === '--new-tab') out.flags.newTab = true;
     else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
     else if (a === '--text') out.flags.text = argv[++i];
+    else if (a === '--label') out.flags.label = argv[++i];
+    else if (a === '--gone') out.flags.gone = true;
+    else if (a === '--enabled') out.flags.enabled = true;
+    else if (a === '--settled') out.flags.settled = true;
+    else if (a === '--url') out.flags.url = argv[++i];
+    else if (a === '--timeout') out.flags.timeout = Math.max(0, Number(argv[++i]) || 0);
     else if (a === '--ref') out.flags.ref = argv[++i];
     else if (a === '--xy') { out.flags.x = Number(argv[++i]); out.flags.y = Number(argv[++i]); }
     else if (a === '--json') out.json = true;
@@ -334,9 +395,9 @@ const TAB_WHY = {
 };
 // doctor is a diagnostic and must still answer on a login page; challenge is
 // how you inspect one safely; login never attaches in the first place.
-const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs']);
+const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect']);
 
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
@@ -380,6 +441,11 @@ const endpoint = { ...resolution.endpoint,
     };
   }
 
+  // A usage error must never cost a connection: connecting can wake a tab in
+  // the user's browser, and a command with no condition has nothing to do.
+  if ((cmd === 'wait' || cmd === 'expect') && !conditionFrom(args, rest)) {
+    throw Object.assign(new Error(conditionUsage(cmd)), { code: 'EUSAGE' });
+  }
   const cdp = shared ?? await CDP.connect(endpoint);
   // Sign-in guard. Runs once per connection, after attach and before the verb,
   // so a command that lands on a login page disconnects instead of working
@@ -407,7 +473,7 @@ const endpoint = { ...resolution.endpoint,
       : args.flags.ref
         ? (cdp.external ? await locate(cdp, cdp.key, args.flags.ref, { speed })
                         : resolveRef(session, args.flags.ref))
-      : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text }) : null);
+      : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text, label: args.flags.label }) : null);
     const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
 
     switch (cmd) {
@@ -445,7 +511,7 @@ const endpoint = { ...resolution.endpoint,
         if (replaced) await selectAll(cdp);
         else await pressKey(cdp, 'End', speed);
         // With --ref or --xy there is no selector positional, so the text is first.
-        const text = (args.flags.ref || hasXY ? rest[0] : rest[1]) ?? '';
+        const text = (args.flags.ref || hasXY || args.flags.label ? rest[0] : rest[1]) ?? '';
         // selectAll only highlights. Typing over the selection replaces it, but
         // typing nothing leaves it highlighted and the old value in place — so
         // `fill "#x" ""`, the documented way to clear a field, reported
@@ -533,6 +599,21 @@ const endpoint = { ...resolution.endpoint,
         return { data: { url: href, tab }, human: `✓ open ${href}  [${tabNote}]` };
       }
 
+      case 'wait':
+      case 'expect': {
+        const c = conditionFrom(args, rest);
+        if (!c) throw Object.assign(new Error(conditionUsage(cmd)), { code: 'EUSAGE' });
+        const timeoutS = cmd === 'expect' ? null : (args.flags.timeout ?? DEFAULT_TIMEOUT_S);
+        const r = cmd === 'expect'
+          ? { ok: await holds(cdp, c), waitedMs: 0 }
+          : await waitFor(cdp, c, { timeoutMs: timeoutS * 1000 });
+        if (!r.ok) {
+          throw Object.assign(new Error(failMessage(c, await nowOn(cdp), timeoutS)), { code: 'EWAIT' });
+        }
+        return { data: { condition: describeCondition(c), waitedMs: r.waitedMs },
+                 human: `✓ ${cmd} ${describeCondition(c)}${r.waitedMs > 300 ? `  (${(r.waitedMs / 1000).toFixed(1)}s)` : ''}` };
+      }
+
       case 'tabs': {
         const tabs = await listTabs(cdp);
         return { data: { count: tabs.length, tabs: tabs.map(t => ({ title: t.title, url: t.url, current: t.current })) },
@@ -548,23 +629,10 @@ const endpoint = { ...resolution.endpoint,
       case 'snapshot': {
         const snap = await capture(cdp, { max: args.flags.max ?? 300 });
         save(cdp.key, snap);
-        // Geometry and null fields were 61% of the JSON and an agent never
-        // reads them: --ref re-resolves position at click time. Only what is
-        // set is emitted.
-        const refs = Object.entries(snap.refs).map(([ref, e]) => {
-          const r = { ref, tag: e.tag };
-          if (e.type && !(e.tag === 'button' && e.type === 'button')) r.type = e.type;
-          if (e.role && !['button', 'link'].includes(e.role)) r.role = e.role;
-          if (e.name) r.name = e.name;
-          if (e.placeholder) r.placeholder = e.placeholder;
-          if (e.value) r.value = e.value;
-          if (e.off) r.off = true;
-          if (e.disabled) r.disabled = true;
-          if (e.selected) r.selected = true;
-          return r;
-        });
+        const refs = slimRefs(snap);
         const lh = loginHint(snap);
         if (lh) hint(args, lh);
+        if (!shared && !args.json) hint(args, 'several steps ahead? write them once: agent-hands help --batch');
         return {
           // The hint goes to stderr for a human. An agent reads --json and saw
           // nothing, so it learned neither that this is a sign-in form nor the
@@ -584,7 +652,7 @@ const endpoint = { ...resolution.endpoint,
 
 // Read-only verbs emit no input event, so no site can observe their timing and
 // nothing needs pacing before them.
-const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs']);
+const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs', 'wait', 'expect']);
 
 // A batch line is just CLI arguments. That is the whole design: an agent that
 // can use this CLI can already write a batch, and every verb added later works
@@ -597,6 +665,8 @@ const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', '
 // JSON is accepted too, for callers generating lines programmatically:
 //   {"cmd":"click","ref":"@e17"}
 //   {"cmd":"text","args":["h1"]}
+const quoteArg = a => (/[\s"]/.test(a) ? '"' + a.replace(/"/g, '\\"') + '"' : a);
+
 function lineToArgv(line) {
   const t = line.trim();
   if (!t.startsWith('{')) return tokenize(t);
@@ -914,21 +984,50 @@ async function requireEditable(cdp, target, cmd) {
   }
   throw Object.assign(new Error(lines.join(NL2)), { code: 'ENOTEDITABLE' });
 }
+// Geometry and null fields were 61% of the JSON and an agent never reads
+// them: --ref re-resolves position at click time. Only what is set is emitted.
+function slimRefs(snap) {
+  return Object.entries(snap.refs).map(([ref, e]) => {
+    const r = { ref, tag: e.tag };
+    if (e.type && !(e.tag === 'button' && e.type === 'button')) r.type = e.type;
+    if (e.role && !['button', 'link'].includes(e.role)) r.role = e.role;
+    if (e.name) r.name = e.name;
+    if (e.placeholder) r.placeholder = e.placeholder;
+    if (e.value) r.value = e.value;
+    if (e.off) r.off = true;
+    if (e.disabled) r.disabled = true;
+    if (e.selected) r.selected = true;
+    return r;
+  });
+}
+
+function conditionUsage(cmd) {
+  const NL = String.fromCharCode(10);
+  return `${cmd} needs a condition. One of:` + NL +
+    `  ${cmd} --text "Saved"             text is on the page` + NL +
+    `  ${cmd} --gone --text "Loading"    text has left the page` + NL +
+    `  ${cmd} --enabled --text "Submit"  control is clickable (or a selector / --label)` + NL +
+    `  ${cmd} --url /dashboard           path starts with this` + NL +
+    `  ${cmd} --settled                  nothing changed for 500 ms` +
+    (cmd === 'wait' ? NL + `  add --timeout <s>  (default ${DEFAULT_TIMEOUT_S})` : '');
+}
+
 function requireArgs(cmd, rest, args, hasXY) {
   const NL = String.fromCharCode(10);
   const bad = m => { throw Object.assign(new Error(m), { code: 'EUSAGE' }); };
   const withRef = args.flags.ref || hasXY;
 
-  if (NEEDS_TARGET.has(cmd) && !withRef && !args.flags.text && !rest[0]) {
+  if (NEEDS_TARGET.has(cmd) && !withRef && !args.flags.text && !args.flags.label && !rest[0]) {
     bad(cmd + ' needs a target. One of:' + NL
       + '  ' + cmd + ' "#css-selector"      a CSS selector' + NL
       + '  ' + cmd + ' --ref @e12           a ref from: agent-hands snapshot' + NL
-      + '  ' + cmd + ' --text "Label"       visible text' + NL
+      + '  ' + cmd + ' --text "Label"       visible text of a button or link' + NL
+      + '  ' + cmd + ' --label "Email"      a form field by its label' + NL
       + '  ' + cmd + ' --xy 420 300         raw viewport coordinates');
   }
   // An explicit "" is the documented way to clear a field and stays legal.
   // A missing positional is a typo, and typing nothing is never what it meant.
-  if (cmd === 'fill' && (withRef ? rest[0] : rest[1]) === undefined) {
+  if (cmd === 'fill' && ((withRef || args.flags.label) ? rest[0] : rest[1]) === undefined) {
     bad('fill needs the text to type, after the target.' + NL
       + '  fill "#email" "you@example.com"   |   fill --ref @e2 "you@example.com"' + NL
       + '  Pass "" to clear the field on purpose.');
@@ -1090,7 +1189,8 @@ const endpoint = { ...resolution.endpoint,
   // immediately, so building it first meant the file drained into a listener
   // that did not exist yet while we awaited the socket, and every line was lost.
   const cdp = await CDP.connect(endpoint);
-  const source = args.flags.file ? createReadStream(args.flags.file) : process.stdin;
+  const source = args.flags.lines ? Readable.from(args.flags.lines.map(l => l + '\n'))
+    : args.flags.file ? createReadStream(args.flags.file) : process.stdin;
   const rl = readline.createInterface({ input: source, crlfDelay: Infinity });
   const gap = args.flags.gap ?? 250;
   let i = -1, worst = 0, lastInput = false;
@@ -1102,7 +1202,23 @@ const endpoint = { ...resolution.endpoint,
       i++;
       let out;
       try {
-        const argv = lineToArgv(line);
+        let argv = lineToArgv(line);
+        // `if <condition> <command>`: the condition is read once, and the
+        // command runs only when it holds. Nothing waits. A skipped line is
+        // still a line, reported as such, so the agent can see the branch.
+        if (argv[0] === 'if') {
+          const at = argv.findIndex((t, k) => k > 0 && NEEDS_BROWSER.has(t));
+          if (at < 0) throw Object.assign(new Error('if needs a condition and then a command: if --text "Accept cookies" click --text "Accept"'), { code: 'EUSAGE' });
+          const ca = parseArgs(argv.slice(1, at));
+          const c = conditionFrom(ca, ca._);
+          if (!c) throw Object.assign(new Error('if needs a condition before the command. Same conditions as wait.'), { code: 'EUSAGE' });
+          if (!(await holds(cdp, c))) {
+            out = { i, ok: true, command: 'if', condition: describeCondition(c), skipped: argv.slice(at).join(' ') };
+            process.stdout.write(JSON.stringify(out) + '\n');
+            continue;
+          }
+          argv = argv.slice(at);
+        }
         // Parse exactly as main() does, so a batch line behaves identically to
         // the same words typed on the command line.
         const la = parseArgs(argv);
@@ -1136,9 +1252,18 @@ const endpoint = { ...resolution.endpoint,
       } catch (e) {
         out = { i, ok: false, command: line.slice(0, 40), error: e.message, code: e.code ?? 'EFAIL' };
         worst = Math.max(worst, EXIT[e.code] ?? 1);
+        // The page at the moment of failure, so the fix can be planned without
+        // another look. Saved too, so --ref works on the very next command.
+        if (e.code !== 'ELOGINPAGE') {
+          try {
+            const snap = await capture(cdp, { max: 40 });
+            save(cdp.key, snap);
+            out.page = { title: snap.title, url: snap.url, refs: slimRefs(snap) };
+          } catch { /* a page that cannot be read still reports the error */ }
+        }
         // A sign-in block is not a per-line failure: every remaining line would
         // hit the same wall and repeat the same paragraph. Stop and say it once.
-        if (args.flags.stopOnError || e.code === 'ELOGINPAGE') {
+        if (args.flags.stopOnError || e.code === 'ELOGINPAGE' || e.code === 'EWAIT') {
           process.stdout.write(JSON.stringify(out) + '\n');
           break;
         }
@@ -1156,6 +1281,8 @@ const endpoint = { ...resolution.endpoint,
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = args._;
+  if (cmd === 'if') { args.flags.lines = [process.argv.slice(2).map(quoteArg).join(' ')]; return runBatch(args); }
+  if ((cmd === 'help' || cmd === '--help') && process.argv.includes('--batch')) return console.log(BATCH_HELP);
 
   // Every exit path gets the notice, including `skills`, `where` and errors.
   // A stale copy is most dangerous exactly when an agent is reading the docs
@@ -1336,7 +1463,7 @@ async function main() {
 
 // 3 is its own code so a caller can tell "a human needs to click something"
 // apart from a real failure, and retry instead of giving up.
-const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6 };
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWAIT: 7 };
 
 main().catch(err => {
   if (process.argv.includes('--json')) {
