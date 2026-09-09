@@ -9,7 +9,7 @@ import readline from 'node:readline';
 import { Readable } from 'node:stream';
 import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint, newTab, listTabs } from '../cli/cdp.mjs';
 import { renderTabs } from '../cli/tab.mjs';
-import { moveTo, clickAt, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
+import { moveTo, clickAt, dragTo, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
 import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } from '../cli/version.mjs';
@@ -72,7 +72,9 @@ COMMANDS
   fill <target> "text"        click, select all, replace. --append to keep old text
   fill --label "Email" "x"    target a form field by its label, no snapshot needed
   type "text"                 type into whatever has focus
-  press <Key> [--times n]     ${Object.keys(KEYS).join(' ')}
+  press <Key> [--times n]     a character, Ctrl+z, Shift+Enter, or ${Object.keys(KEYS).join(' ')}
+  drag <target> --to-xy x y   press, travel with the button held, release
+  drag --xy x y --to "#sel"   canvas shapes, sliders, cell ranges
   scroll <pixels>             negative scrolls up
   where                       print last cursor position
   doctor                      check the session is reachable
@@ -347,6 +349,8 @@ function parseArgs(argv) {
     else if (a === '--timeout') out.flags.timeout = Math.max(0, Number(argv[++i]) || 0);
     else if (a === '--ref') out.flags.ref = argv[++i];
     else if (a === '--xy') { out.flags.x = Number(argv[++i]); out.flags.y = Number(argv[++i]); }
+    else if (a === '--to') out.flags.to = argv[++i];
+    else if (a === '--to-xy') { out.flags.toX = Number(argv[++i]); out.flags.toY = Number(argv[++i]); }
     else if (a === '--json') out.json = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--full') out.flags.full = true;
@@ -396,7 +400,7 @@ const TAB_WHY = {
 // doctor is a diagnostic and must still answer on a login page; challenge is
 // how you inspect one safely; login never attaches in the first place.
 const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect']);
-const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill']);
+const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill', 'drag']);
 const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect']);
 
 async function run(args, cmd, rest, shared) {
@@ -485,6 +489,19 @@ const endpoint = { ...resolution.endpoint,
         const m = await moveTo(cdp, session, target, target.w, speed);
         return { data: { ...m, tag: target.tag }, human: `✓ hover ${target.tag} at ${at} ${m.points} pts / ${m.ms}ms` };
       }
+      case 'drag': {
+        const toXY = Number.isFinite(args.flags.toX);
+        if (!toXY && !args.flags.to) {
+          throw Object.assign(new Error('drag needs a destination: --to "<selector>" or --to-xy <x> <y>'), { code: 'EUSAGE' });
+        }
+        const dest = toXY
+          ? { x: args.flags.toX, y: args.flags.toY, w: 12, h: 12, tag: 'XY' }
+          : await resolveTarget(cdp, { selector: args.flags.to });
+        const m = await dragTo(cdp, session, target, dest, target.w, speed);
+        return { data: { ...m, from: at, to: `(${Math.round(dest.x)},${Math.round(dest.y)})`, tag: target.tag },
+                 human: `✓ drag ${at} -> (${Math.round(dest.x)},${Math.round(dest.y)}) ${m.points} pts / ${m.ms}ms` };
+      }
+
       case 'click': {
         const m = await clickAt(cdp, session, target, target.w, speed);
         return { data: { ...m, tag: target.tag }, human: `✓ click ${target.tag} at ${at} ${m.points} pts / ${m.ms}ms${m.overshoot ? ' +correction' : ''}` };

@@ -28,14 +28,15 @@ function writePos(session, x, y) {
 
 // ------------------------------------------------------------- mouse
 
-function dispatchMove(cdp, x, y) {
+function dispatchMove(cdp, x, y, held = false) {
   cdp.fire('Input.dispatchMouseEvent', {
     type: 'mouseMoved', x: Math.round(x), y: Math.round(y),
     timestamp: Date.now() / 1000, pointerType: 'mouse',
+    ...(held ? { button: 'left', buttons: 1 } : {}),
   });
 }
 
-export async function moveTo(cdp, session, to, width, speed) {
+export async function moveTo(cdp, session, to, width, speed, { held = false } = {}) {
   const from = readPos(session) || { x: rand(80, 400), y: rand(300, 600) };
   const dist = Math.hypot(to.x - from.x, to.y - from.y);
   if (dist < 2) return { points: 0, ms: 0, overshoot: false };
@@ -49,13 +50,13 @@ export async function moveTo(cdp, session, to, width, speed) {
 
   const t0 = Date.now();
   for (const p of bezierPath(from, aim, steps)) {
-    dispatchMove(cdp, p.x, p.y);
+    dispatchMove(cdp, p.x, p.y, held);
     await sleep(TICK_MS);
   }
   if (overshoot) {
     await sleep(lognormal(45, 0.4, 140));
     for (const p of bezierPath(aim, to, Math.round(rand(5, 9)))) {
-      dispatchMove(cdp, p.x, p.y);
+      dispatchMove(cdp, p.x, p.y, held);
       await sleep(TICK_MS);
     }
   }
@@ -73,6 +74,22 @@ export async function clickAt(cdp, session, to, width, speed) {
   cdp.fire('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', timestamp: Date.now() / 1000 });
   await sleep(lognormal(72, 0.35, 200)); // button dwell
   cdp.fire('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', timestamp: Date.now() / 1000 });
+  return move;
+}
+
+// Press at one point, travel with the button held, release at another. A
+// drawn shape, a slider, a range of cells: none of them can be done with a
+// click. The travel is the same Bezier path a move uses, so the held stroke
+// looks like the free one.
+export async function dragTo(cdp, session, from, to, width, speed) {
+  await moveTo(cdp, session, from, width, speed);
+  await sleep(lognormal(90, 0.45, 320));
+  const at = p => ({ x: Math.round(p.x), y: Math.round(p.y), button: 'left', clickCount: 1, pointerType: 'mouse' });
+  cdp.fire('Input.dispatchMouseEvent', { ...at(from), type: 'mousePressed', timestamp: Date.now() / 1000 });
+  await sleep(lognormal(110, 0.35, 300)); // the hand settles before it pulls
+  const move = await moveTo(cdp, session, to, width, speed, { held: true });
+  await sleep(lognormal(80, 0.4, 260));
+  cdp.fire('Input.dispatchMouseEvent', { ...at(to), type: 'mouseReleased', timestamp: Date.now() / 1000 });
   return move;
 }
 
@@ -121,17 +138,46 @@ export const KEYS = {
   ArrowRight: { code: 'ArrowRight', key: 'ArrowRight', vk: 39 },
 };
 
+const MODIFIERS = { alt: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, shift: 8 };
+const PUNCT = { ' ': ['Space', 32], '/': ['Slash', 191], '.': ['Period', 190], ',': ['Comma', 188],
+  '-': ['Minus', 189], '=': ['Equal', 187], ';': ['Semicolon', 186], "'": ['Quote', 222],
+  '[': ['BracketLeft', 219], ']': ['BracketRight', 221], '\\': ['Backslash', 220], '`': ['Backquote', 192] };
+
+// "Enter", "r", "/", "Ctrl+z", "Shift+Enter". A shortcut is one key with
+// modifiers held, so a canvas app's whole toolbar is reachable from here.
+function keyFrom(name) {
+  const parts = name.split('+');
+  const last = parts.length > 1 && name.endsWith('+') ? '+' : parts.pop();
+  let modifiers = 0;
+  for (const m of parts) {
+    const bit = MODIFIERS[m.toLowerCase()];
+    if (!bit) return null;
+    modifiers |= bit;
+  }
+  const named = KEYS[last];
+  if (named) return { ...named, modifiers };
+  if (last.length !== 1) return null;
+  const ch = last;
+  if (/[a-z]/i.test(ch)) return { key: ch, code: 'Key' + ch.toUpperCase(), vk: ch.toUpperCase().charCodeAt(0), text: ch, modifiers };
+  if (/[0-9]/.test(ch)) return { key: ch, code: 'Digit' + ch, vk: ch.charCodeAt(0), text: ch, modifiers };
+  const p = PUNCT[ch];
+  return { key: ch, code: p ? p[0] : '', vk: p ? p[1] : 0, text: ch, modifiers };
+}
+
 export async function pressKey(cdp, name, speed) {
-  const k = KEYS[name];
+  const k = keyFrom(name);
   if (!k) {
-    const err = new Error(`unknown key "${name}". known: ${Object.keys(KEYS).join(', ')}`);
+    const err = new Error(`unknown key "${name}". A single character, one of ${Object.keys(KEYS).join(', ')}, or a shortcut like Ctrl+z, Shift+Enter.`);
     err.code = 'EUSAGE';
     throw err;
   }
-  const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk };
+  // Text is inserted on the char event. With Ctrl or Alt held the key is a
+  // command, and sending text would insert a letter as well.
+  const inserts = k.text && !(k.modifiers & 3);
+  const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk, modifiers: k.modifiers };
   await sleep(lognormal(140, 0.4, 400) / speed); // humans pause before committing
-  cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'rawKeyDown' });
-  if (k.text) cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'char', text: k.text });
+  cdp.fire('Input.dispatchKeyEvent', { ...base, type: inserts ? 'keyDown' : 'rawKeyDown' });
+  if (inserts) cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'char', text: k.text, unmodifiedText: k.text });
   await sleep(lognormal(70, 0.35, 200) / speed);
   cdp.fire('Input.dispatchKeyEvent', { ...base, type: 'keyUp' });
   return { key: name };

@@ -194,6 +194,10 @@ exactly this.
 
 ## Batch: many commands, one connection
 
+**First visit to a page: one batch, not one command per look.** `open`, a
+`wait` for the text you expect, then `snapshot` in the same `run`. Every
+extra one-shot look is a model turn you paid for nothing.
+
 Every one-shot command pays a Node start plus a connect. Measured on this
 machine: ~370 ms of process boot and ~130 ms of connect, for a command whose
 real work is a few milliseconds. Eight commands cost 3.1 s one at a time and
@@ -374,6 +378,8 @@ agent-hands fill --ref @e63 "text"            # with --ref, text is the first ar
 agent-hands fill "#note" " more" --append     # keep old text, append at the end
 agent-hands type "into whatever has focus"
 agent-hands press Enter                    # Tab Escape Backspace Delete Home End Arrow*
+agent-hands press r                        # any single character; Ctrl+z, Shift+Enter
+agent-hands drag --xy 300 300 --to-xy 500 420   # press, travel held, release: shapes, sliders, cell ranges
 agent-hands press Backspace --times 20     # one process, not twenty
 agent-hands scroll 600                     # negative scrolls up
 agent-hands where                          # last cursor position
