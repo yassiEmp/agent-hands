@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.15.1, published 24 Aug 2026. 0.16.0 is committed and unpublished.
+npm has 0.15.1, published 24 Aug 2026. 0.17.0 is committed and unpublished.
 
 ## The four rules the design rests on
 
@@ -107,10 +107,17 @@ Traps measured on httpbin.org/forms/post:
 - A usage error on `wait` used to connect first. On the owner's browser that
   woke a frozen tab. Conditions are validated before any connection.
 
-Test protocol agreed: a Haiku subagent gets only `skills get core` and
+Test protocol: a Haiku subagent gets only `skills get core` and
 `help --batch`, a throwaway browser and two tasks (GitHub search; three
 labelled rectangles on Excalidraw). Its transcript shows what the docs fail
-to teach. Figma and Google Sheets come after, on the owner's account.
+to teach. Results, 9 Sep 2026:
+- Trial 1: GitHub done in 11 invocations, still one snapshot per step.
+  Excalidraw failed: `press r` refused (named keys only) and no drag.
+- Added `drag` and character/shortcut keys. Trial 2: Excalidraw done, the
+  drawing was ONE batch of 12 lines, 5 invocations in all. No doc issue
+  reported. It could not verify the canvas from the DOM; a screenshot verb
+  is the next gap for canvas apps.
+Figma and Google Sheets come next, on the owner's account.
 
 ## Fixed in 0.16.0 (8 Sep 2026) — an agent navigated the user's YouTube tab
 
