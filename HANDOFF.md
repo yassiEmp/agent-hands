@@ -75,6 +75,43 @@ npm has 0.15.1, published 24 Aug 2026. 0.16.0 is committed and unpublished.
   and the two cases cannot be told apart from the page: a clean browser
   started by `launch` carries the same shim.
 
+## 0.17.0 (9 Sep 2026) — write the flow before you see the page
+
+Decision, after a grilling session with the owner: NO scripting lane inside
+the tool. No inline JS, no Node library, no mini language. The agent writes
+batch lines, or writes a script in any language that prints batch lines or
+calls the CLI per step. One surface to learn, no sandbox to guard, no page-side
+JS back door that could fire an instant click.
+
+What the tool gained so a batch can be written blind:
+- `wait <condition> [--timeout s]`, `expect <condition>`, `if <condition>
+  <command>`. Conditions take the same target words as `click`: a selector,
+  `--text`, `--label`, plus `--gone`, `--enabled`, `--url`, `--settled`.
+  Polling is reads only. A wait that waited ends with a reaction pause
+  (lognormal 500 ms) so the next input does not land the instant the page
+  changed. Code in `cli/wait.mjs`.
+- `--label "Email"` on click and fill: a field by the words next to it, exact
+  match first, ambiguity is an error listing the candidates. `finderFor` in
+  `cli/gestures.mjs` is shared by click, fill and wait.
+- A failed batch line carries `page: {title, url, refs}` (40 refs) and saves
+  it, so `--ref` works on the next command. `EWAIT` is exit 7 and stops the
+  batch.
+- `help --batch` is the short guide; the core skill has the same plus two
+  script patterns (generate-then-pipe, read-compute-write).
+
+Traps measured on httpbin.org/forms/post:
+- `--url /post` matched `/forms/post` by substring before the click landed.
+  A pattern starting with `/` now matches the path start.
+- A url matches when navigation commits, before the new document has a body.
+  The url condition now also requires readyState interactive or complete.
+- A usage error on `wait` used to connect first. On the owner's browser that
+  woke a frozen tab. Conditions are validated before any connection.
+
+Test protocol agreed: a Haiku subagent gets only `skills get core` and
+`help --batch`, a throwaway browser and two tasks (GitHub search; three
+labelled rectangles on Excalidraw). Its transcript shows what the docs fail
+to teach. Figma and Google Sheets come after, on the owner's account.
+
 ## Fixed in 0.16.0 (8 Sep 2026) — an agent navigated the user's YouTube tab
 
 Reported from a real session. `open` with no `--tab` navigated the tab the
