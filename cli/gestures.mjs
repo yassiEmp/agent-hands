@@ -154,8 +154,11 @@ function keyFrom(name) {
     if (!bit) return null;
     modifiers |= bit;
   }
-  const named = KEYS[last];
+  const ALIAS = { Down: 'ArrowDown', Up: 'ArrowUp', Left: 'ArrowLeft', Right: 'ArrowRight',
+    Esc: 'Escape', Return: 'Enter', Space: ' ', Del: 'Delete' };
+  const named = KEYS[ALIAS[last] ?? last];
   if (named) return { ...named, modifiers };
+  if (ALIAS[last] === ' ') return { key: ' ', code: 'Space', vk: 32, text: ' ', modifiers };
   if (last.length !== 1) return null;
   const ch = last;
   if (/[a-z]/i.test(ch)) return { key: ch, code: 'Key' + ch.toUpperCase(), vk: ch.toUpperCase().charCodeAt(0), text: ch, modifiers };
