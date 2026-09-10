@@ -7,8 +7,12 @@
 #
 # Mirrors the agent-win -> PyPI workflow (same repo owner, same pattern).
 #
-# Requires npm CLI >= 11.5.1 for trusted publishing, hence the explicit `npm install -g npm@latest`
-# — the npm bundled with setup-node's Node 22 is older than that.
+# Requires npm CLI >= 11.5.1 for trusted publishing. Node 24 bundles that by default — Node 22
+# bundles npm 10, which silently falls back to an anonymous request and fails with a misleading
+# E404 rather than a clear auth error. A manual `npm install -g npm@latest` on top of Node 22 was
+# tried first and still 404'd (the self-upgraded CLI did not take effect for the publish step), so
+# this follows npm's own documented example and just runs on Node 24 instead. See
+# https://docs.npmjs.com/trusted-publishers/ and https://github.com/npm/cli/issues/9088.
 
 name: publish
 
@@ -31,10 +35,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
       - name: Verify package version matches the release tag
         if: github.event_name == 'release'
         run: |
