@@ -157,6 +157,21 @@ href query strings, `type="button"` on buttons and long container excerpts.
 Remaining large outputs: `skills get core` ~4500 tokens per session and the
 USAGE text ~3100 tokens on any unknown command. Not touched.
 
+## Fixed in agent-win, 10 Sep 2026 — parallel window walking
+
+Item 3 below (cold approval ~52s) was `session.find_across` in agent-win walking every top-level
+window's tree one after another. uiautomation forbids touching a Control from a thread that did
+not create it, so the fix is a small thread pool (`MAX_WALK_WORKERS = 4`, agent-win's
+`session.py`) where each worker independently initialises COM and re-acquires its OWN Control via
+`ControlFromHandle` — no Control ever crosses a thread boundary, only plain dicts do. Falls back to
+sequential on any pool error.
+
+Measured on the owner's machine, 9 top-level windows (2 heavy Edge windows among them): 9.9s
+sequential -> 4.6s parallel for an unscoped `find --type Button`. A single-window scoped search
+(the common case for `approve.mjs`'s `--process` scan when only one browser window is open) is
+unchanged, since there is nothing to parallelise there — the remaining cost in that case is the
+walk of that one heavy tree, not the sequential-windows problem this fix targets.
+
 ## Known open, in priority order
 
 1. **The UIA login lane is unverified.** `login --window <title>` drives the OS
@@ -167,12 +182,9 @@ USAGE text ~3100 tokens on any unknown command. Not touched.
    (`login @e2 @e3`) is verified end to end and is the main path.
 2. **Two siblings without `AGENT_HANDS_ID` can still clobber each other's pin.**
    The replaced pin warns at `use` time; nothing warns at command time.
-3. **Cold approval is ~52s**, dominated by agent-win walking window trees
-   sequentially. Scoping to the browser process took 3723ms -> 2863ms per scan.
-   The real fix is parallel walking inside agent-win, a different repo.
-4. `agent-browser --init-script` is silently ignored on this machine — verified
+3. `agent-browser --init-script` is silently ignored on this machine — verified
    by `Screen.prototype` being unpatched. Upstream, third-party binary.
-5. `browsers` prints "Use this one" for the user's own Edge when it is the only
+4. `browsers` prints "Use this one" for the user's own Edge when it is the only
    reachable target. That browser holds their live logins, and the line reads
    as a recommendation rather than a question. The core skill says ask first;
    the CLI output does not.
