@@ -284,6 +284,15 @@ Seven, in the order they bite:
 3. That release's `published` event triggers `.github/workflows/publish.yml`, which publishes to
    npm via Trusted Publishing (OIDC, no stored token) — same pattern as agent-win's PyPI publish.
 
-One-time setup still needed on npmjs.com: package settings -> Trusted Publisher -> GitHub Actions
--> org `yassiEmp`, repo `agent-hands`, workflow filename `publish.yml`. Until that is done, the
-publish job will fail with an auth error — the release itself still succeeds either way.
+Done (10 Sep 2026): npmjs.com package settings -> Trusted Publisher -> GitHub Actions -> org
+`yassiEmp`, repo `agent-hands`, workflow filename `publish.yml`, environment `npm`. v0.17.0 was
+published this way and confirmed live with a signed provenance statement.
+
+**The npmjs.com "Repository" field must be the bare repo name** (`agent-hands`), not a full URL.
+The form pre-fills and happily SAVES a full GitHub URL there with no validation error, and every
+OIDC token exchange then fails with a deliberately vague "package not found" that has nothing to
+do with the actual problem (npm/cli#9088). Those identity fields are locked once saved, so a wrong
+value means delete and recreate the connection, not edit it — editing only ever changes the Label
+and the publish-allowed checkbox. `.github/workflows/publish.yml` also strips an empty
+`_authToken` line that `actions/setup-node`'s `registry-url` writes to `.npmrc`, which otherwise
+makes npm skip the OIDC exchange and fail with a plain 404 (npm/documentation#1960).

@@ -8,8 +8,17 @@
 # Mirrors the agent-win -> PyPI workflow (same repo owner, same pattern).
 #
 # Requires npm CLI >= 11.5.1 for trusted publishing — Node 24 bundles that by default (Node 22
-# bundles npm 10, too old). See the "Strip the empty _authToken" step below for the other half of
-# what it took to get this working: https://docs.npmjs.com/trusted-publishers/
+# bundles npm 10, too old).
+#
+# Two things had to be right before this actually worked, neither of which produced a clear error:
+# 1. On npmjs.com, the Trusted Publisher "Repository" field must be the bare repo name
+#    ("agent-hands"), not a full URL. The npm UI happily pre-fills and SAVES a full GitHub URL
+#    there (derived from package.json's repository field) with no validation error, and every
+#    OIDC token exchange then fails with "package not found" — npm's deliberately vague message
+#    for a claims mismatch, per https://github.com/npm/cli/issues/9088. Those identity fields are
+#    locked once saved (npmjs.com says so), so a wrong value means delete and recreate the
+#    connection, not edit it.
+# 2. See the "Strip the empty _authToken" step below.
 
 name: publish
 
@@ -43,15 +52,6 @@ jobs:
             echo "package.json version ($PKG_VERSION) does not match release tag ($GITHUB_REF_NAME)"
             exit 1
           fi
-      - name: Decode this run's OIDC token claims (public repo, nothing secret in the JWT body)
-        run: |
-          RESP=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org")
-          TOKEN=$(node -e "console.log(JSON.parse(process.argv[1]).value)" "$RESP")
-          node -e "
-            const [h,p] = process.argv[1].split('.');
-            console.log(JSON.stringify(JSON.parse(Buffer.from(p,'base64').toString('utf8')), null, 2));
-          " "$TOKEN"
       - name: Strip the empty _authToken setup-node writes to .npmrc
         # setup-node's registry-url writes //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}.
         # With no NODE_AUTH_TOKEN (the whole point of trusted publishing: no token to set), that
@@ -62,5 +62,4 @@ jobs:
         # OIDC in the first place, so keep it and just remove the empty line it leaves behind.
         # https://github.com/npm/documentation/issues/1960
         run: sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-      - name: Publish (verbose, temporarily, to see the real OIDC rejection reason)
-        run: npm publish --loglevel silly 2>&1 | grep -i "oidc\|npm error\|npm notice Publish"
+      - run: npm publish
