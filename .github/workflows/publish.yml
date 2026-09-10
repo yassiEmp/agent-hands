@@ -53,4 +53,5 @@ jobs:
         # OIDC in the first place, so keep it and just remove the empty line it leaves behind.
         # https://github.com/npm/documentation/issues/1960
         run: sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
-      - run: npm publish
+      - name: Publish (verbose, temporarily, to see the real OIDC rejection reason)
+        run: npm publish --loglevel silly 2>&1 | grep -i "oidc\|npm error\|npm notice Publish"
