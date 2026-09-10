@@ -1,0 +1,47 @@
+# Publish agent-hands to npm on a GitHub release, using Trusted Publishing.
+#
+# No npm token is stored anywhere. GitHub mints a short-lived OIDC identity for this specific
+# workflow, and npm accepts it because the package is registered with this repo + workflow as a
+# trusted publisher (npmjs.com -> package settings -> Trusted Publisher). That is why
+# `id-token: write` below is mandatory: without it there is no identity to present.
+#
+# Mirrors the agent-win -> PyPI workflow (same repo owner, same pattern).
+#
+# Requires npm CLI >= 11.5.1 for trusted publishing, hence the explicit `npm install -g npm@latest`
+# — the npm bundled with setup-node's Node 22 is older than that.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:        # lets you publish by hand from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm          # must match the environment named on npmjs.com, if you set one
+    permissions:
+      id-token: write          # required: this is what mints the OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+      - name: Verify package version matches the release tag
+        if: github.event_name == 'release'
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "package.json version ($PKG_VERSION) does not match release tag ($GITHUB_REF_NAME)"
+            exit 1
+          fi
+      - run: npm publish

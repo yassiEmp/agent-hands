@@ -271,4 +271,19 @@ Seven, in the order they bite:
   silently fail to match; a `/c/...` path inside a `node -e` string resolves as
   `C:\c\...`; heredocs eat backslashes, so build `\n` from `String.fromCharCode`
   or write the block to a file and splice it.
-- Do not push. The remote is public.
+- Pushing to `main` is fine now (owner confirmed, 10 Sep 2026); the remote is public but that is
+  not itself a reason to withhold pushes. `.github/workflows/publish.yml` publishes to npm on a
+  GitHub release (not on every push to main) — see "How to ship a release" below.
+
+## How to ship a release
+
+1. Land your changes on `main` as normal commits.
+2. `npm version patch` (or `minor`/`major`). This bumps `package.json`, commits, tags `vX.Y.Z`,
+   then runs `postversion` (`scripts/postversion.mjs`), which pushes the commit + tag and opens a
+   GitHub release from it.
+3. That release's `published` event triggers `.github/workflows/publish.yml`, which publishes to
+   npm via Trusted Publishing (OIDC, no stored token) — same pattern as agent-win's PyPI publish.
+
+One-time setup still needed on npmjs.com: package settings -> Trusted Publisher -> GitHub Actions
+-> org `yassiEmp`, repo `agent-hands`, workflow filename `publish.yml`. Until that is done, the
+publish job will fail with an auth error — the release itself still succeeds either way.

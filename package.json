@@ -3,6 +3,9 @@
   "version": "0.17.0",
   "description": "Human-rate mouse and keyboard for agent-browser sessions. Drives Chrome over raw CDP at 60-100Hz with Fitts-law motion, Bezier paths and lognormal keystroke timing — without touching the physical cursor.",
   "type": "module",
+  "scripts": {
+    "postversion": "node scripts/postversion.mjs"
+  },
   "bin": {
     "agent-hands": "bin/agent-hands.mjs",
     "hands": "bin/agent-hands.mjs"
