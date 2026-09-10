@@ -46,4 +46,11 @@ jobs:
             echo "package.json version ($PKG_VERSION) does not match release tag ($GITHUB_REF_NAME)"
             exit 1
           fi
+      - name: Debug — npm/node versions and OIDC-relevant env
+        run: |
+          node --version
+          npm --version
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
+          npm config get registry
+          cat "$NPM_CONFIG_USERCONFIG" 2>/dev/null | sed 's/_authToken=.*/_authToken=<redacted>/'
       - run: npm publish
