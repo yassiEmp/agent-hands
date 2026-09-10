@@ -7,12 +7,9 @@
 #
 # Mirrors the agent-win -> PyPI workflow (same repo owner, same pattern).
 #
-# Requires npm CLI >= 11.5.1 for trusted publishing. Node 24 bundles that by default — Node 22
-# bundles npm 10, which silently falls back to an anonymous request and fails with a misleading
-# E404 rather than a clear auth error. A manual `npm install -g npm@latest` on top of Node 22 was
-# tried first and still 404'd (the self-upgraded CLI did not take effect for the publish step), so
-# this follows npm's own documented example and just runs on Node 24 instead. See
-# https://docs.npmjs.com/trusted-publishers/ and https://github.com/npm/cli/issues/9088.
+# Requires npm CLI >= 11.5.1 for trusted publishing — Node 24 bundles that by default (Node 22
+# bundles npm 10, too old). See the "Strip the empty _authToken" step below for the other half of
+# what it took to get this working: https://docs.npmjs.com/trusted-publishers/
 
 name: publish
 
@@ -36,6 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+          registry-url: "https://registry.npmjs.org"
       - name: Verify package version matches the release tag
         if: github.event_name == 'release'
         run: |
@@ -45,11 +43,14 @@ jobs:
             echo "package.json version ($PKG_VERSION) does not match release tag ($GITHUB_REF_NAME)"
             exit 1
           fi
-      - name: Debug — npm/node versions and OIDC-relevant env
-        run: |
-          node --version
-          npm --version
-          echo "ACTIONS_ID_TOKEN_REQUEST_URL is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo yes || echo no)"
-          npm config get registry
-          cat "$NPM_CONFIG_USERCONFIG" 2>/dev/null | sed 's/_authToken=.*/_authToken=<redacted>/'
+      - name: Strip the empty _authToken setup-node writes to .npmrc
+        # setup-node's registry-url writes //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}.
+        # With no NODE_AUTH_TOKEN (the whole point of trusted publishing: no token to set), that
+        # line is present but empty — and npm treats "an _authToken line exists" as "classic auth
+        # is configured", skipping the OIDC exchange entirely and failing with a 404 that has
+        # nothing to do with the trusted publisher config. Dropping registry-url instead was tried
+        # and made npm skip OIDC altogether (ENEEDAUTH) — registry-url is what makes npm attempt
+        # OIDC in the first place, so keep it and just remove the empty line it leaves behind.
+        # https://github.com/npm/documentation/issues/1960
+        run: sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
       - run: npm publish
