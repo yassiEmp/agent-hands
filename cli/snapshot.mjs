@@ -20,7 +20,7 @@ const refsFile = key => path.join(STATE, `${key}.refs.json`);
 
 const INTERACTIVE = 'a,button,input,textarea,select,summary,[role=button],[role=link],'
   + '[role=tab],[role=checkbox],[role=radio],[role=combobox],[role=textbox],[role=switch],'
-  + '[role=menuitem],[role=option],[onclick],[contenteditable],[tabindex]:not([tabindex="-1"])';
+  + '[role=menuitem],[role=menuitemradio],[role=menuitemcheckbox],[role=option],[onclick],[contenteditable],[tabindex]:not([tabindex="-1"])';
 const STRUCTURAL = 'header,nav,main,footer,form,dialog,[role=dialog],iframe';
 
 // Runs in the page. Returns a flat list; nesting is rebuilt from `depth`.
