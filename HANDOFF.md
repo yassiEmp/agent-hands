@@ -218,6 +218,14 @@ sequential -> 4.6s parallel for an unscoped `find --type Button`. A single-windo
 unchanged, since there is nothing to parallelise there — the remaining cost in that case is the
 walk of that one heavy tree, not the sequential-windows problem this fix targets.
 
+## Growth
+
+`docs/growth-playbook.md` (15 Sep 2026): where the tool stands (0 stars, no
+outside users), the positioning decision forced by agent-browser PR #1810
+(curved mouse movement lands upstream; sell "the browser you are logged
+into", the full gesture model and the refusals), and a week / month / quarter
+plan. `scripts/metrics.mjs` prints the weekly row for `docs/metrics.csv`.
+
 ## Known open, in priority order
 
 1. **The UIA login lane is unverified.** `login --window <title>` drives the OS
