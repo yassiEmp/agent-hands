@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { browserNames, browserDir, profileDir, readPortFile, portAlive } from './cdp.mjs';
+import { hasAgentBrowser } from './env.mjs';
 
 // Browsers this CLI started itself. Without these a browser the agent launched
 // a moment ago is absent from the list, and the summary line happily points at
@@ -81,7 +82,11 @@ export async function survey() {
 const MARK = { running: '●', stale: '✗', dead: '✗', off: '○' };
 
 export function render(rows) {
-  if (!rows.length) return 'no browsers found on this machine.';
+  if (!rows.length) {
+    return 'no browsers found on this machine.\n' +
+      '  Looked for Edge, Chrome, Brave, Chromium and Vivaldi profiles at their default paths.\n' +
+      '  Install one, or start any Chromium build: agent-hands launch <url> --exe <path>';
+  }
   const live = rows.filter(r => r.state === 'running');
   const w = Math.max(...rows.map(r => r.name.length));
   const out = [];
@@ -106,8 +111,12 @@ export function render(rows) {
       out.push(`    ${/edge/.test(off[0].name) ? 'edge' : 'chrome'}://inspect/#remote-debugging`
         + `  ->  "Allow remote debugging for this browser instance"`);
     }
-    out.push(`  Or start a throwaway one:`);
-    out.push(`    agent-browser --session work --profile "${profileDir('work')}" open <url> --headed`);
+    out.push(`  Or start one with the right flags (needs no other tool):`);
+    out.push(`    agent-hands launch <url>`);
+    if (hasAgentBrowser()) {
+      out.push(`  Or a pooled agent-browser session:`);
+      out.push(`    agent-browser --session work --profile "${profileDir('work')}" open <url> --headed`);
+    }
   } else if (live.length === 1 || live.some(r => r.kind === 'launched')) {
     const r = live.find(x => x.kind === 'launched') ?? live[0];
     out.push(`Use this one: ${r.name}   ${flagFor(r)}`);

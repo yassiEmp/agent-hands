@@ -59,18 +59,31 @@ export function findExe(name) {
 
 export function browserChoices() { return Object.keys(EXES[process.platform] || EXES.linux); }
 
+// The first browser actually installed, in table order. A fixed default of
+// "edge" refused to start on a machine that only had Chrome.
+export function defaultBrowser() {
+  return browserChoices().find(name => findExe(name)) ?? null;
+}
+
 export function profilePath(nameOrDir) {
   if (!nameOrDir) return path.join(os.homedir(), '.agent-hands-profiles', 'default');
   if (nameOrDir.includes('/') || nameOrDir.includes(path.sep)) return nameOrDir;
   return path.join(os.homedir(), '.agent-hands-profiles', nameOrDir);
 }
 
-export async function launch({ url, browser = 'edge', profile, port = 0, waitMs = 30000, log = () => {} }) {
-  const exe = findExe(browser);
+export async function launch({ url, browser, exe: exeFlag, profile, port = 0, waitMs = 30000, log = () => {} }) {
+  if (exeFlag && !fs.existsSync(exeFlag)) {
+    throw Object.assign(new Error(`--exe ${exeFlag} does not exist.`), { code: 'EUSAGE' });
+  }
+  if (!browser) browser = exeFlag ? path.basename(exeFlag, path.extname(exeFlag)) : defaultBrowser();
+  const exe = exeFlag || (browser && findExe(browser));
   if (!exe) {
+    const installed = browserChoices().filter(findExe);
     throw Object.assign(new Error(
-      `${browser} not found on this machine.\n  known: ${browserChoices().join(', ')}\n` +
-      `  pass --exe <path> for anything else`), { code: 'EUSAGE' });
+      (browser ? `${browser} not found on this machine.\n` : `no Chromium browser found at a known path.\n`) +
+      `  known: ${browserChoices().join(', ')}` +
+      (installed.length ? `\n  installed: ${installed.join(', ')}   pick one with --browser <name>` : '') +
+      `\n  pass --exe <path> for any other Chromium build`), { code: 'EUSAGE' });
   }
   const dir = profilePath(profile);
   fs.mkdirSync(dir, { recursive: true });
@@ -129,7 +142,9 @@ export async function launch({ url, browser = 'edge', profile, port = 0, waitMs 
       '  A different profile is the fast way past it:',
       '    agent-hands launch <url> --profile <name>',
       '  To reuse this one, close every process on it and move it aside:',
-      `    powershell -NoProfile -Command \"Move-Item '${dir}' '${dir}.broken'\"`);
+      process.platform === 'win32'
+        ? `    powershell -NoProfile -Command \"Move-Item '${dir}' '${dir}.broken'\"`
+        : `    mv '${dir}' '${dir}.broken'`);
   }
   throw Object.assign(new Error(lines.join(String.fromCharCode(10))), { code: 'EFAIL' });
 }

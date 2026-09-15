@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 // Deliberately no approve.mjs import. Approval belongs to daemon.mjs alone.
 import { safeCommand } from './audit.mjs';
 import { pipeName, probe } from './daemon.mjs';
+import { hasAgentBrowser } from './env.mjs';
 
 const HOME = os.homedir();
 const PROFILES = process.env.AGENT_HANDS_PROFILES
@@ -127,8 +128,15 @@ export function resolveEndpoint({ session, cdp, browser, userDataDir } = {}) {
     throw Object.assign(new Error(
       `session "${session}" is not running.\n` +
       `  looked for: ${path.join(pooled, 'DevToolsActivePort')}\n` +
-      `  fix: launch it, then retry:\n` +
-      `    agent-browser --session ${session} --profile "${pooled}" open <url> --headed`
+      `  Start a browser with the right flags (prints the --cdp port to use next):\n` +
+      `    agent-hands launch <url>\n` +
+      `  Or attach to a browser you already have open:\n` +
+      `    agent-hands browsers\n` +
+      (hasAgentBrowser()
+        ? `  Or start the pooled session itself:\n` +
+          `    agent-browser --session ${session} --profile "${pooled}" open <url> --headed`
+        : `  (--session names an agent-browser pool. agent-browser is not on PATH, so\n` +
+          `   there is no pool here; launch and --browser need no extra install.)`)
     ), { code: 'ENOSESSION' });
   }
   return found;

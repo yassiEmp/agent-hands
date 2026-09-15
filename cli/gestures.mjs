@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
+import { hasAgentBrowser } from './env.mjs';
 import { rand, sleep, lognormal, moveDuration, bezierPath } from './motion.mjs';
 
 const TICK_MS = 10; // 100Hz dispatch; Chrome coalesces to a 60-125Hz trace
@@ -318,6 +319,14 @@ export function resolveRef(session, ref) {
   if (!/^@?[a-zA-Z]\d+$/.test(ref)) {
     const err = new Error(`invalid ref "${ref}". Expected a snapshot ref such as @e12.`);
     err.code = 'EUSAGE'; throw err;
+  }
+
+  if (!hasAgentBrowser()) {
+    const err = new Error(
+      `${ref} is not a ref this CLI minted, and agent-browser is not on PATH to ask.\n` +
+      `  fix: agent-hands snapshot    then use one of the @e refs it prints.`);
+    err.code = 'ENOTFOUND';
+    throw err;
   }
 
   const run = sub => execSync(`agent-browser --session ${session} ${sub} ${ref}`,

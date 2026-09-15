@@ -111,9 +111,11 @@ export async function loginFlow(opts) {
     challengeWaitMs = 180000, log = () => {},
   } = opts;
 
-  if (agentWinMissing()) throw Object.assign(new Error(MISSING_HINT), { code: 'ENOUIA' });
-
+  // A missing agent-win is only discovered by the first call, so the check
+  // must follow it. Before this a fresh machine reported "no browser windows
+  // are visible to the OS" for a tool that was never installed.
   const win = await findWindow(windowMatch);
+  if (agentWinMissing()) throw Object.assign(new Error(MISSING_HINT), { code: 'ENOUIA' });
   if (!win) {
     // Name what WAS seen. UIA only enumerates windows that exist on the
     // desktop, so a browser with a live debugging port but no window — headless,

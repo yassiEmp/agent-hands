@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// agent-hands — human-rate mouse and keyboard for an agent-browser session.
+// agent-hands — human-rate mouse and keyboard for a real Chromium browser.
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved,
 // 4 sign-in page while flagged, 5 several browsers live (ask the user), 6 dead pin.
 
+import '../cli/require-node.mjs';   // exits on Node < 22 before anything below can throw
 import { readFileSync, createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import { Readable } from 'node:stream';
@@ -22,6 +23,7 @@ import { load as loadConfig, save as saveConfig, clear as clearConfig, agentId, 
 import { resolve as resolveTargetCfg, endpointFor, flagFor } from '../cli/target.mjs';
 import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
+import { probeEnvironment, renderEnvironment, hasAgentBrowser } from '../cli/env.mjs';
 import { loginFlow } from '../cli/login.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
@@ -51,7 +53,7 @@ START HERE  (agents: this is the whole loop)
 
 COMMANDS
   use [<n>|--cdp <port>]      pin a browser; later commands need no target flag
-  launch <url>                start a browser with the right flags, print its port
+  launch <url> [--exe path]   start a browser with the right flags, print its port
   login @e2 @e3 @e5           fill a form with refs YOU chose; see SIGNING IN
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
@@ -78,7 +80,7 @@ COMMANDS
   drag --xy x y --to "#sel"   canvas shapes, sliders, cell ranges
   scroll <pixels>             negative scrolls up
   where                       print last cursor position
-  doctor                      check the session is reachable
+  doctor                      what this machine has, and is the browser reachable
   update [--yes]              report a newer version; --yes applies it
   audit [--times <n>]         who authorised and drove this browser (--browser only)
   skills list                 list bundled docs
@@ -371,6 +373,7 @@ function parseArgs(argv) {
     else if (a === '--password-stdin') out.flags.passwordStdin = true;
     else if (a === '--window') out.flags.window = argv[++i];
     else if (a === '--profile') out.flags.profile = argv[++i];
+    else if (a === '--exe') out.flags.exe = argv[++i];
     else if (a === '--port') out.flags.port = Number(argv[++i]) || 0;
     else if (a === '--no-remember') out.flags.noRemember = true;
     else if (a === '--dry-run') out.flags.dryRun = true;
@@ -434,7 +437,9 @@ const endpoint = { ...resolution.endpoint,
     if (!shared) { await cdp.drain(); cdp.close(); }
     const warn = out.headless
       ? '\n  ⚠ HEADLESS — logins will not survive here and Google sign-in is refused.'
-        + `\n    relaunch: agent-browser --session ${session} --profile "${profileDir(session)}" open <url> --headed`
+        + `\n    relaunch headed: agent-hands launch <url>`
+        + (hasAgentBrowser()
+          ? `\n    or: agent-browser --session ${session} --profile "${profileDir(session)}" open <url> --headed` : '')
       : '';
     return {
       data: out,
@@ -476,8 +481,11 @@ const endpoint = { ...resolution.endpoint,
     const target = hasXY
       ? { x: args.flags.x, y: args.flags.y, w: 12, h: 12, tag: 'XY' }
       : args.flags.ref
-        ? (cdp.external ? await locate(cdp, cdp.key, args.flags.ref, { speed, force: args.flags.force })
-                        : resolveRef(session, args.flags.ref))
+        // This CLI's own snapshot wins wherever one exists for this browser.
+        // Only a pooled session with no agent-hands snapshot asks agent-browser.
+        ? ((cdp.external || loadSnapshot(cdp.key))
+            ? await locate(cdp, cdp.key, args.flags.ref, { speed, force: args.flags.force })
+            : resolveRef(session, args.flags.ref))
       : (NEEDS_TARGET.has(cmd) ? await resolveTarget(cdp, { selector: rest[0], text: args.flags.text, label: args.flags.label, force: args.flags.force }) : null);
     const at = target && `(${Math.round(target.x)},${Math.round(target.y)})`;
 
@@ -1341,7 +1349,7 @@ async function main() {
 
   if (cmd === 'launch') {
     const r = await launch({
-      url: rest[0], browser: args.browser || 'edge',
+      url: rest[0], browser: args.browser, exe: args.flags.exe,
       profile: args.flags.profile, port: args.flags.port ?? 0,
       log: m => { if (!args.json) console.error(m); },
     });
@@ -1478,15 +1486,25 @@ async function main() {
   // what keeps the cache warm for every gesture command.
   if (cmd === 'doctor' && !args.flags.noUpdateCheck && cacheIsStale()) await fetchLatest();
 
-  const result = await run(args, cmd, rest);
+  // doctor answers "what does this machine have" as well as "is the browser
+  // reachable", so a fresh install that cannot reach a browser still learns
+  // what is installed and what each missing piece would unlock.
+  const env = cmd === 'doctor' ? await probeEnvironment() : null;
+  let result;
+  try {
+    result = await run(args, cmd, rest);
+  } catch (err) {
+    if (env) err.env = env;
+    throw err;
+  }
   if (args.quiet) return;
 
   const upd = args.flags.noUpdateCheck ? null : updateField(staleness());
   if (args.json) {
     console.log(JSON.stringify({ ok: true, command: cmd, ...result.data,
-      ...(args._via ? { via: args._via } : {}), ...(upd ? { update: upd } : {}) }));
+      ...(args._via ? { via: args._via } : {}), ...(env ? { env } : {}), ...(upd ? { update: upd } : {}) }));
   } else {
-    console.log(result.human);
+    console.log(result.human + (env ? `\n\n${renderEnvironment(env)}` : ''));
   }
 }
 
@@ -1496,9 +1514,11 @@ const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWA
 
 main().catch(err => {
   if (process.argv.includes('--json')) {
-    console.log(JSON.stringify({ ok: false, error: err.message, code: err.code ?? 'EFAIL' }));
+    console.log(JSON.stringify({ ok: false, error: err.message, code: err.code ?? 'EFAIL',
+      ...(err.env ? { env: err.env } : {}) }));
   } else {
     console.error('✗ ' + err.message);
+    if (err.env) console.error('\n' + renderEnvironment(err.env));
   }
   process.exitCode = EXIT[err.code] ?? 1;
 });
