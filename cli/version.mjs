@@ -13,13 +13,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const STATE = path.join(os.homedir(), '.agent-browser', 'humanize');
 const CACHE = path.join(STATE, '.version-check.json');
 const TTL_MS = 24 * 60 * 60 * 1000;
 const REGISTRY = 'https://registry.npmjs.org/agent-hands/latest';
 
-export const ROOT = path.dirname(new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+// fileURLToPath, not .pathname: the URL form keeps %20 for a space in the
+// path and a slash before the drive letter, and path.dirname on the
+// trailing-slash form returned the PARENT of the package (C:/projects), so a
+// linked clone was reported as a global install and `update --yes` would have
+// run npm over it.
+export const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]+$/, '');
 
 export function runningVersion() {
   return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
