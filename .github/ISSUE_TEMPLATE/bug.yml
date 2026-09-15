@@ -1,0 +1,29 @@
+name: Bug or unexpected refusal
+description: Something did not work, or the CLI refused and you think it should not have.
+body:
+  - type: input
+    id: command
+    attributes:
+      label: What did you run
+      placeholder: agent-hands click --ref @e5 --browser edge
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect, and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `agent-hands doctor`
+      description: It prints the Node version, platform, and which optional tools were found.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: heard
+    attributes:
+      label: Where did you hear about agent-hands
+      placeholder: agent-browser issue, a blog post, skills.sh, a friend, search

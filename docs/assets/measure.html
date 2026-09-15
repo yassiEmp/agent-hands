@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- Input-cadence probe for docs/evidence.md. Records every pointer, key and
+     wheel event with a high-resolution timestamp and renders the statistics
+     into #stats as JSON, so a CLI can read them back with `agent-hands text`.
+     Reload between runs. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>agent-hands input probe</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 24px; }
+  #target { position: absolute; left: 640px; top: 360px; width: 140px; height: 44px; font-size: 16px; }
+  #field { position: absolute; left: 120px; top: 120px; width: 260px; font-size: 16px; padding: 8px; }
+  #scroller { position: absolute; left: 120px; top: 460px; width: 400px; height: 160px; overflow: auto; border: 1px solid #999; }
+  #scroller div { height: 3000px; background: linear-gradient(#eee, #999); }
+  #stats { position: absolute; left: 820px; top: 40px; width: 460px; white-space: pre-wrap; font: 12px monospace; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+</style>
+</head>
+<body>
+<h1>agent-hands input probe</h1>
+<input id="field" placeholder="type here">
+<button id="target">Click me</button>
+<div id="scroller"><div></div></div>
+<pre id="stats">{}</pre>
+<script>
+  const moves = [], downs = [], ups = [], keydowns = [], keyups = [], wheels = [];
+  const now = () => performance.now();
+  addEventListener('mousemove', e => moves.push({ t: now(), x: e.clientX, y: e.clientY }), true);
+  addEventListener('mousedown', e => downs.push(now()), true);
+  addEventListener('mouseup', e => ups.push(now()), true);
+  addEventListener('keydown', e => { if (!e.repeat) keydowns.push(now()); }, true);
+  addEventListener('keyup', e => keyups.push(now()), true);
+  addEventListener('wheel', e => wheels.push({ t: now(), dy: e.deltaY }), true);
+
+  const median = a => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const pct = (a, p) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+  const r1 = v => v == null ? null : Math.round(v * 10) / 10;
+
+  function stats() {
+    // Only the movement that ended in the last click counts as "the move".
+    const lastDown = downs.length ? downs[downs.length - 1] : Infinity;
+    const prevUp = ups.filter(t => t < lastDown).pop() ?? -Infinity;
+    const seg = moves.filter(m => m.t > prevUp && m.t <= lastDown);
+    const gaps = seg.slice(1).map((m, i) => m.t - seg[i].t);
+    let path = 0;
+    for (let i = 1; i < seg.length; i++) path += Math.hypot(seg[i].x - seg[i - 1].x, seg[i].y - seg[i - 1].y);
+    const straight = seg.length > 1 ? Math.hypot(seg.at(-1).x - seg[0].x, seg.at(-1).y - seg[0].y) : 0;
+    const clickDwell = downs.length && ups.length ? ups[ups.length - 1] - downs[downs.length - 1] : null;
+
+    const dwells = keydowns.map((d, i) => keyups[i] != null ? keyups[i] - d : null).filter(v => v != null);
+    const flights = keyups.slice(0, -1).map((u, i) => keydowns[i + 1] - u).filter(v => v > 0);
+
+    const wg = wheels.slice(1).map((w, i) => w.t - wheels[i].t);
+    const bursts = wg.reduce((n, g) => n + (g > 200 ? 1 : 0), wheels.length ? 1 : 0);
+
+    return {
+      move: { events: seg.length, duration_ms: seg.length > 1 ? r1(seg.at(-1).t - seg[0].t) : 0,
+              gap_median_ms: r1(median(gaps)), gap_p90_ms: r1(pct(gaps, 0.9)), gap_max_ms: r1(Math.max(0, ...gaps)),
+              straightness: seg.length > 1 && path ? r1(straight / path * 100) / 100 : null, path_px: Math.round(path) },
+      click: { count: downs.length, dwell_ms: r1(clickDwell) },
+      keys: { count: keydowns.length, dwell_median_ms: r1(median(dwells)), flight_median_ms: r1(median(flights)),
+              flight_p90_ms: r1(pct(flights, 0.9)) },
+      wheel: { events: wheels.length, bursts, gap_median_ms: r1(median(wg.filter(g => g <= 200))), total_dy: wheels.reduce((s, w) => s + w.dy, 0) },
+      all_mousemoves: moves.length,
+    };
+  }
+  let timer = null;
+  const render = () => { clearTimeout(timer); timer = setTimeout(() => { document.getElementById('stats').textContent = JSON.stringify(stats(), null, 1); }, 120); };
+  for (const ev of ['mousemove', 'mousedown', 'mouseup', 'keydown', 'keyup', 'wheel']) addEventListener(ev, render, true);
+  document.getElementById('target').addEventListener('click', () => { document.getElementById('target').textContent = 'Clicked'; });
+</script>
+</body>
+</html>

@@ -7,6 +7,12 @@ motion with Bezier paths and lognormal keystroke timing.
 
 It never moves your physical cursor and never raises the window.
 
+![agent-hands driving a throwaway Edge: snapshot, fill at human rate, press Enter, click the result](docs/assets/hero.gif)
+
+Captured over CDP from the page itself, at real speed. The numbers behind
+every claim here, and the way to reproduce them, are in
+[docs/evidence.md](docs/evidence.md).
+
 ```bash
 agent-hands snapshot                         # find the element, get @e1 @e2
 agent-hands fill "#searchbox_input" "auto ecole vincennes"
@@ -31,6 +37,28 @@ impossible. Behavioural scoring reads both as automation.
 | scroll | — | wheel-like bursts with pauses |
 
 Human reference: 60-125Hz sampling, 50-100ms dwell, 100-200ms flight.
+Measured on 15 Sep 2026: median gap 16.7 ms, click dwell 67 ms, key dwell
+58 ms, flight 134 ms ([docs/evidence.md](docs/evidence.md)).
+
+agent-browser's pull request #1810 adds curved `--human` mouse movement to
+its own sessions. When it merges, the move and click rows will be re-measured
+with the same probe. The typing model, the scroll model, and attaching to a
+browser you did not launch are not in its scope.
+
+## What it touches, and what it does not
+
+- One CDP socket. It sends input events and reads the DOM. Nothing else.
+- Credentials never appear in argv or in output. They arrive through
+  `--email-env`, `--password-env` or stdin, and are typed, not logged.
+- The physical cursor never moves. The window is never raised.
+- On your own browser it holds one approved connection in a relay and writes
+  an audit line per command. `agent-hands audit` prints them.
+- It refuses when a click would be wrong: a covered target, a form container
+  instead of a field, a sign-in page while `navigator.webdriver` is set.
+- It is not a cloak. One detector reporting green, measured in
+  [docs/evidence.md](docs/evidence.md), says nothing about Turnstile or
+  DataDome, which score account history and IP as well. `--pause-on-challenge`
+  hands those to you.
 
 ## When to reach for it
 
