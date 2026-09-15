@@ -1,8 +1,9 @@
 # agent-hands
 
-**Hands for `agent-browser`.** It navigates and reads; this clicks, types and
-scrolls at human rates. One CDP socket, a whole gesture dispatched at 60-100Hz,
-Fitts-law motion with Bezier paths and lognormal keystroke timing.
+**Human-rate hands for a real Chromium browser.** One you launched, the one you
+are logged into, or an `agent-browser` session. It clicks, types and scrolls at
+human rates. One CDP socket, a whole gesture dispatched at 60-100Hz, Fitts-law
+motion with Bezier paths and lognormal keystroke timing.
 
 It never moves your physical cursor and never raises the window.
 
@@ -47,10 +48,26 @@ On a throwaway session this buys nothing. There is no account to lose.
 
 ```bash
 npm i -g agent-hands
-agent-hands doctor          # checks the session is reachable
+agent-hands doctor          # what this machine has, and whether a browser is reachable
 ```
 
-Requires Node 22 or newer for the built-in `WebSocket`. No dependencies.
+Requires Node 22 or newer for the built-in `WebSocket`, and a Chromium browser
+(Edge, Chrome, Brave or Chromium). No npm dependencies.
+
+Two other tools are optional. `doctor` reports whether each one is present.
+
+| Tool | What it unlocks | Without it |
+|---|---|---|
+| [agent-win](https://github.com/yassiEmp/agent-win), Windows only, `pip install agent-win` | clicks the "Allow remote debugging?" prompt for you; `login --window` | you click Allow once per browser run; `login --window` refuses and says why |
+| [agent-browser](https://github.com/vercel-labs/agent-browser) | pooled throwaway sessions via `--session` | `agent-hands launch`, `--browser` or `--cdp` |
+
+First run with nothing else installed:
+
+```bash
+agent-hands launch https://example.com     # starts a browser with the right flags, prints its port
+agent-hands snapshot --cdp <port>          # see the page, get @e1 @e2
+agent-hands click --ref @e3 --cdp <port>   # act on what you saw
+```
 
 ## Commands
 

@@ -10,7 +10,9 @@ Human-rate input for a real Chromium browser, over raw CDP. Dispatches a whole
 gesture at 60-100Hz on one socket, so mouse paths and keystroke timings fall
 inside human ranges.
 
-Install: `npm i -g agent-hands`
+Install: `npm i -g agent-hands`, then `agent-hands doctor`. It needs Node 22+
+and a Chromium browser. `agent-win` and `agent-browser` are optional; `doctor`
+says whether each is present and what it unlocks.
 
 ## Start here
 

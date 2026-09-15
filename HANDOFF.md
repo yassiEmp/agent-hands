@@ -75,6 +75,52 @@ npm has 0.15.1, published 24 Aug 2026. 0.17.0 is committed and unpublished.
   and the two cases cannot be told apart from the page: a clean browser
   started by `launch` carries the same shim.
 
+## Fixed 15 Sep 2026, unreleased — a fresh machine could not start
+
+Reported by the owner: another developer installed the CLI and it did not run,
+because that machine had neither agent-win nor agent-browser. Walked the fresh
+path with PATH holding only Node, and with a faked Node 20. Five things, in
+the order they bit:
+
+1. `doctor` needed a browser before it said anything. On a fresh machine it
+   died with "session work is not running" and told the dev to run
+   `agent-browser`, a tool they did not have. `doctor` now probes the
+   environment (Node version, platform, agent-win, agent-browser, with what
+   each optional tool unlocks and what happens without it) and prints that
+   block after the browser answer, or after the error when no browser
+   answers. `--json` carries it as `env`. Code in `cli/env.mjs`.
+2. Node 20 failed on the first browser command with
+   `ReferenceError: WebSocket is not defined`. `cli/require-node.mjs` is the
+   first import in `bin/agent-hands.mjs` and refuses on Node < 22 with the
+   reason and the fix, exit 2.
+3. `login --window` on a machine without agent-win said "no browser windows
+   are visible to the OS at all". The missing-tool check ran BEFORE the first
+   probe, and the probe is what discovers the tool is missing. The check now
+   follows the first call. On macOS and Linux nothing is probed at all (UI
+   Automation is a Windows API) and the hint says so. `python3` is tried
+   after `python`, for a checkout on those platforms.
+4. Every "start a browser" hint named `agent-browser`. "session is not
+   running", `browsers` with nothing live, and doctor's HEADLESS warning now
+   lead with `agent-hands launch <url>` and mention agent-browser only when
+   `cli/env.mjs` finds it on PATH. `--ref` on a pooled session now prefers
+   this CLI's own snapshot and asks agent-browser only when there is none, so
+   a ref from `agent-hands snapshot` is never resolved against agent-browser's
+   numbering.
+5. `launch` defaulted to edge and refused on a machine with only Chrome. It
+   now takes the first installed of edge, chrome, brave, chromium. `--exe
+   <path>`, which the error message had promised since 0.15, is now parsed.
+
+Found on the way: `ROOT` in `cli/version.mjs` was `C:/projects`, the parent
+of the package, because `path.dirname` on a trailing-slash URL pathname strips
+the last segment. `installMode()` therefore reported this linked clone as a
+global install, and `update --yes` would have run `npm i -g agent-hands@latest`
+over it. Now `fileURLToPath`, which also survives a space in the path.
+
+Acceptance, run on this machine: `npm pack`, install the tarball into a
+scratch prefix, PATH holding only Node and that prefix. `doctor`, `browsers`,
+`launch`, `snapshot --cdp`, `click --ref --cdp` and `login --window` each
+either work or answer with a message that names the fix.
+
 ## 0.17.0 (9 Sep 2026) — write the flow before you see the page
 
 Decision, after a grilling session with the owner: NO scripting lane inside

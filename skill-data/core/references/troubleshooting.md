@@ -67,7 +67,15 @@ without a debugging port, then reattach; existing sessions are accepted.
 
 ## "session is not running"
 
-No `DevToolsActivePort` in the profile directory. Launch the session:
+No `DevToolsActivePort` in the profile directory. `--session` names an
+`agent-browser` pool, which only exists where `agent-browser` is installed.
+Start a browser this CLI can drive on its own:
+
+```bash
+agent-hands launch <url>          # prints the --cdp port to use next
+```
+
+Or, on a machine that has `agent-browser`, start the pooled session:
 
 ```bash
 agent-browser --session work --profile "$HOME/.agent-browser-profiles/main" \
@@ -78,8 +86,9 @@ Then `agent-hands doctor`.
 
 ## "no element matched"
 
-Run `agent-browser --session <s> snapshot -i` and use a real selector. If you
-used `--text`, the match is ranked but ambiguous pages defeat it.
+Run `agent-hands snapshot` and use a `--ref`, or a real selector from the tree
+it prints. If you used `--text`, the match is ranked but ambiguous pages defeat
+it.
 
 ## Chrome exited early without writing DevToolsActivePort
 
@@ -93,8 +102,9 @@ prompt drawn in the browser's window chrome. CDP cannot see or dismiss it, so
 the websocket upgrade hangs — no error, no 403 — until it is clicked.
 
 agent-win clicks it for you, but it is a SEPARATE Windows-only install and no
-dependency of this package. Put `agent-win` on PATH, or set `AGENT_WIN_HOME` to a
-checkout. When it is missing you get one line saying so — click the prompt
+dependency of this package. `pip install agent-win` puts it on PATH, or set
+`AGENT_WIN_HOME` to a checkout; `agent-hands doctor` says whether it was found.
+When it is missing you get one line saying so — click the prompt
 yourself, and note the connection must already be in flight, because the button
 only exists while an upgrade is pending.
 

@@ -59,6 +59,13 @@ Earlier guidance called `agent-hands` a last resort behind `agent-browser`.
 That stopped being true once it grew `launch`, `open`, `snapshot` and `text`:
 it is a complete loop on its own now.
 
+Neither `agent-browser` nor `agent-win` has to be installed. `agent-hands
+doctor` reports whether each is present and what it unlocks. Without
+`agent-browser` there is no pool: start a browser with `agent-hands launch
+<url>` or attach to the user's own with `--browser`. Without `agent-win` the
+user clicks the "Allow" prompt once per browser run, and `login --window`
+refuses with a message.
+
 ## Signing in
 
 Sign-in is where a site grades hardest, so the CLI guards it rather than
@@ -353,6 +360,16 @@ own chrome and your terminal's on-screen text.
 ## The loop
 
 ```bash
+agent-hands launch https://example.com        # or: agent-hands browsers, then use <n>
+agent-hands snapshot                          # see the page, get @e1 @e2
+agent-hands click --ref @e5                   # act
+agent-hands text h1                           # verify
+```
+
+On a pooled `agent-browser` session the same loop works, and `agent-browser`
+can do the reading there:
+
+```bash
 S="--session work"
 
 agent-browser $S open https://example.com     # navigate with agent-browser
@@ -361,7 +378,7 @@ agent-hands $S click "#submit"                # act with agent-hands
 agent-browser $S get url                      # verify with agent-browser
 ```
 
-Always verify the result with `agent-browser` after acting. `agent-hands`
+Always verify after acting, with `text`, `snapshot` or `expect`. `agent-hands`
 reports that it dispatched the gesture, not that the page reacted.
 
 ## Commands
