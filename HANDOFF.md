@@ -226,7 +226,19 @@ outside users), the positioning decision forced by agent-browser PR #1810
 into", the full gesture model and the refusals), and a week / month / quarter
 plan. `scripts/metrics.mjs` prints the weekly row for `docs/metrics.csv`.
 
+Executed 15 Sep 2026 under the owner's mandate: see `docs/growth-playbook.md`,
+section 9, for every link. The evidence page was measured with
+`docs/assets/measure.html`; the hero was captured over CDP with
+`docs/assets/screencast.mjs`, never from the screen, after a screen-region
+capture recorded the owner's own browser instead of the throwaway one.
+
 ## Known open, in priority order
+
+0. **`scroll` emits no wheel events.** It moves `window.scrollY` in eased
+   steps (`scrollBy` in `cli/gestures.mjs`). A page listening to `wheel`
+   sees nothing; a page listening to `scroll` sees human-like stepping.
+   Real wheel input is `Input.dispatchMouseEvent {type: "mouseWheel"}` and
+   should replace the in-page write. Measured on the probe page, 15 Sep 2026.
 
 1. **The UIA login lane is unverified.** `login --window <title>` drives the OS
    accessibility layer for a browser you cannot relaunch. No Edge window on this

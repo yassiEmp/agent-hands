@@ -12,7 +12,8 @@ L337  4. Channels, ranked for this tool
 L359  5. Artifacts to make, with specs
 L411  6. Measurement, weekly
 L434  7. Rules
-L452  8. Sources
+L452  8. Status, 15 Sep 2026 (executed under the owner's mandate)
+L490  9. Sources
 -->
 
 ## 0. Where it stands
@@ -449,7 +450,45 @@ What each number means:
 - Commit the metrics row weekly. A plan without a number next to it is a
   wish.
 
-## 8. Sources
+## 8. Status, 15 Sep 2026 (executed under the owner's mandate)
+
+Done today, with where to look:
+
+| Item | State |
+|---|---|
+| Repo description, homepage, 13 topics | set |
+| Hero recording, page-only, over CDP (`docs/assets/record-hero.sh`) | in the README |
+| Evidence page with measured cadence and the detector table | `docs/evidence.md` |
+| Trust section on the README first screen | done |
+| Issue template with "where did you hear" | `.github/ISSUE_TEMPLATE/bug.yml` |
+| skills.sh: skill installed through the CLI (`agent-hands-core`) | listing page still 404; mechanism undocumented, re-check in a week |
+| `agent-browser-plugin-hands` (launch.mutate + command.run) | https://github.com/yassiEmp/agent-browser-plugin-hands, installable by `agent-browser plugin add yassiEmp/agent-browser-plugin-hands`; not on npm (needs `npm login` here) |
+| agent-browser docs PR: Community plugins section | https://github.com/vercel-labs/agent-browser/pull/1857 |
+| agent-browser #120 comment, data first | https://github.com/vercel-labs/agent-browser/issues/120#issuecomment-5680075477 |
+| awesome-browser-automation PR | https://github.com/angrykoala/awesome-browser-automation/pull/154 |
+| awesome-agent-skills PR | https://github.com/VoltAgent/awesome-agent-skills/pull/1058 |
+| awesome-claude-code recommendation, filed through the web form by agent-hands | https://github.com/hesreallyhim/awesome-claude-code/issues/2849 |
+| X post from @yassi_yari | posted, GitHub card attached |
+| Releases | 0.17.1 (fresh-machine fixes), 0.17.2 (README, evidence), 0.17.3 (snapshot walker fix) |
+
+Not done, on purpose:
+
+- Reddit and Discord posts. The rooms need presence first (rule: ten answers
+  per mention). Nothing there yet.
+- PR #1810 comment. Nothing to add that the #120 comment did not say.
+- OpenClaw: the stealth-backend issue is closed and points to their plugin
+  hub. A ClawHub plugin is a later item.
+- Comparison pages, "how it works" post, Show HN, newsletters: after the
+  first outside users.
+- Live agent-browser re-measurement: `agent-browser open` hung on this
+  machine in 0.27.0 and 0.37.1 (see evidence page, Limits).
+
+Found while doing it, fixed in the tool: the snapshot walker skipped
+`menuitemradio` items, so GitHub's category menu showed one entry. Found
+and left open: `scroll` emits no wheel events (in-page `scrollBy`), so a
+page listening to `wheel` sees nothing.
+
+## 9. Sources
 
 agent-browser facts, read on 15 Sep 2026:
 
