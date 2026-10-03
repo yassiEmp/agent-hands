@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.17.4, published 3 Oct 2026 by CI. Check with `npm view agent-hands version`.
+npm has 0.17.6, published 3 Oct 2026 by CI. Check with `npm view agent-hands version`.
 
 ## The four rules the design rests on
 
@@ -233,6 +233,32 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/measure.html`; the hero was captured over CDP with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
+
+## 0.17.6 (3 Oct 2026) — slow is not frozen, and `open` keeps your tabs
+
+From a bug report written by an agent driving WhatsApp Web, Vercel and Play
+Console in the owner's live Edge.
+
+1. **Slow tabs were called frozen.** Any tab silent for 2.5s was "woken" by
+   switching the user's screen. Measured: the VISIBLE WhatsApp Web tab took
+   3.9-4.9s to answer, Play Console 5.6s, Vercel 2.5-8s. Now only 10s of
+   silence means frozen (`QUIET_MS` in `cli/cdp.mjs`). The agent had then
+   asked the owner to change Edge settings, and the owner rejected that:
+   browser settings are the user's choice, never a first-failure fix.
+2. **`open` replaced the user's WhatsApp tab.** `run --tab X` passes --tab to
+   every line, and `open` treated --tab as "navigate in place". Now only
+   --here navigates in place on an attached browser.
+3. Probe sessions are detached after the pick. They piled up one per tab per
+   command, and each sets navigator.webdriver on its tab.
+4. When --tab matches several tabs, a hint names the one picked.
+5. A save behind a second confirmation (Play Console) returned ok:true on
+   every line and saved nothing. The skill now ends a save with `expect`.
+
+Open: Edge reports up to four tabs "visible" in one window
+(`Browser.getWindowForTarget` gives one id), so the tab focus returns to
+after a wake may not be the user's. The wake path itself was not retested on
+a browser-frozen tab: a tab frozen with `Page.setWebLifecycleState` does not
+thaw on activation, so it is no stand-in.
 
 ## 0.17.4 (3 Oct 2026) — approval without agent-win, frozen Edge tabs
 
