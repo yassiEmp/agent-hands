@@ -460,6 +460,7 @@ const endpoint = { ...resolution.endpoint,
   // or wake one. With --tab it still picks, because that also re-targets.
   const pageless = cmd === 'tabs' && !args.tab;
   const cdp = shared ?? await CDP.connect(pageless ? { ...endpoint, page: false } : endpoint);
+  if (!shared) warnTabMatches(args, cdp);
   // Sign-in guard. Runs once per connection, after attach and before the verb,
   // so a command that lands on a login page disconnects instead of working
   // there. `login` never attaches, `doctor` is diagnostic, and --force opts out.
@@ -584,10 +585,13 @@ const endpoint = { ...resolution.endpoint,
         // On a browser the user is working in, the picked tab is theirs: it
         // held whatever they were reading. Navigating it in place took a
         // YouTube tab away from the user (8 Sep 2026). So a fresh background
-        // tab is the default there. --here navigates in place, --tab picks one.
+        // tab is the default there. Only --here navigates in place, with --tab
+        // choosing which tab. --tab alone used to count as "in place", and a
+        // batch passes --tab to every line: `run --tab whatsapp` with an
+        // `open` line replaced the user's WhatsApp Web (3 Oct 2026).
         // A browser this CLI launched has nothing to protect, so in place.
         const attached = Boolean(cdp.sessionId);
-        const inPlace = args.flags.here || Boolean(args.tab) || (!attached && !args.flags.newTab);
+        const inPlace = args.flags.here || (!attached && !args.flags.newTab);
         const replaced = inPlace ? { title: cdp.title, url: cdp.url } : null;
         if (inPlace) await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
         else await newTab(cdp, url);
@@ -1083,6 +1087,15 @@ function requireArgs(cmd, rest, args, hasXY) {
   }
 }
 
+// --tab is a substring match, so it can hit several tabs. Say which one won:
+// "--tab environment-variables" once matched a frozen Vercel tab the agent
+// did not mean, and the error read as if a different tab was blocking it.
+function warnTabMatches(args, cdp) {
+  if (!(cdp.tabMatches > 1)) return;
+  hint(args, [`--tab "${args.tab}" matched ${cdp.tabMatches} tabs; using "${(cdp.title || cdp.url || '').slice(0, 60)}".`,
+              'A longer match picks another. agent-hands tabs lists them.']);
+}
+
 function hint(args, lines) {
   if (args.flags.noHints || args.quiet) return;
   const body = Array.isArray(lines) ? lines : [lines];
@@ -1229,6 +1242,7 @@ const endpoint = { ...resolution.endpoint,
   // immediately, so building it first meant the file drained into a listener
   // that did not exist yet while we awaited the socket, and every line was lost.
   const cdp = await CDP.connect(endpoint);
+  warnTabMatches(args, cdp);
   const source = args.flags.lines ? Readable.from(args.flags.lines.map(l => l + '\n'))
     : args.flags.file ? createReadStream(args.flags.file) : process.stdin;
   const rl = readline.createInterface({ input: source, crlfDelay: Infinity });

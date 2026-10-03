@@ -264,6 +264,7 @@ export class CDP {
       cdp.url = page.url;
       cdp.title = page.title;
       cdp.tabWhy = page.why;
+      cdp.tabMatches = page.matches;
       // The first setup call doubles as a liveness check. Edge 154 freezes a
       // tab again within seconds of it going to the background, so a tab that
       // answered the probe as hidden can be frozen by now.
@@ -655,6 +656,7 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
     );
   }
   const candidates = wanted.length ? wanted : pages;
+  const matches = tab ? wanted.length : 0;
 
   const probed = await probeTabs(cdp, pages, candidates);
   const byId = new Map(probed.map(p => [p.targetId, p]));
@@ -666,7 +668,7 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
     || wantedProbed.find(p => p.state === 'hidden');
   if (live) {
     if (why === 'visible' && live.state === 'hidden') why = 'hidden';
-    return { ...live, visibleId, why };
+    return { ...live, visibleId, matches, why };
   }
 
   const target = wantedProbed[0];
@@ -685,11 +687,16 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
     throw new Error(`"${name}" stayed frozen after being activated.${WAKE_HINT}`);
   }
   // The caller hands the foreground back in drain(), after the command.
-  return { ...target, restoreTo, visibleId, why: `${why}, woken` };
+  return { ...target, restoreTo, visibleId, matches, why: `${why}, woken` };
 }
 
+// The lasting fix is the browser's own exception list. CDP cannot keep a
+// background tab awake: Page.setWebLifecycleState was tested and does not.
 const WAKE_HINT = '\n  Switch to that tab yourself and retry, or pick another one with --tab <match>.' +
-  '\n  agent-hands tabs lists them without waking any.';
+  '\n  agent-hands tabs lists them without waking any.' +
+  '\n  To stop the browser freezing this site, add it to the keep-awake list:' +
+  '\n    Edge:   edge://settings/system/managePerformance  ->  "Never put these sites to sleep"' +
+  '\n    Chrome: chrome://settings/performance  ->  "Always keep these sites active"';
 
 // Bring a tab to the front and wait until it answers. Thawing is not instant:
 // a heavy Vercel tab took 2.6s on Edge 154, just past one probe's 2.5s.

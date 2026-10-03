@@ -140,8 +140,8 @@ Windows, macOS and Linux. Any other Chromium build works with
 it the first command picks the visible tab and remembers it, so later commands
 return to that tab even after you switch away. `agent-hands tabs` shows which
 tab commands go to. `open` on an attached browser creates a new background tab,
-so the page you are reading is never navigated away; `--here` navigates the
-current tab instead.
+so the page you are reading is never navigated away, even with `--tab`. Only
+`--here` navigates in place: the current tab, or the `--tab` match.
 
 That endpoint serves no `/json/*` routes, so nothing can discover targets over
 HTTP. They are read over the browser websocket with `Target.getTargets` instead,
