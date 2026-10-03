@@ -140,6 +140,24 @@ One prompt appears per pending attempt. Clicking an old one approves a
 connection that already timed out, while your live socket keeps waiting. Clear
 them all, then check the socket rather than the screen.
 
+## "stayed frozen after being activated"
+
+The browser froze a background tab to save memory. Edge does this to any tab
+the user has not looked at for a while, and again within 3s of hiding a tab
+that was woken. A frozen tab answers no command.
+
+agent-hands wakes the tab by bringing it to the front for the command, then
+gives the user back their tab. If the tab does not wake within 7.5s, the
+command fails with this message. CDP cannot keep a background tab awake.
+
+The lasting fix is the browser's exception list. Ask the user to add each
+site the agent works on:
+
+- Edge: `edge://settings/system/managePerformance`, "Never put these sites to sleep"
+- Chrome: `chrome://settings/performance`, "Always keep these sites active"
+
+`agent-hands tabs` lists the tabs without waking any.
+
 ## Typed text arrives mangled
 
 Keystroke entry drops and repeats characters when focus moves mid-type; measured

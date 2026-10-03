@@ -381,6 +381,19 @@ agent-browser $S get url                      # verify with agent-browser
 Always verify after acting, with `text`, `snapshot` or `expect`. `agent-hands`
 reports that it dispatched the gesture, not that the page reacted.
 
+A save is the case that bites. Many consoles (Google Play Console, for one)
+open a second confirmation dialog after "Save", and nothing is saved until it
+is answered. Every line of the batch still returns `ok:true`. So end a save
+with the proof that it landed, never with the click:
+
+```bash
+printf '%s\n' \
+  'click --text "Save"' \
+  'if --text "Confirm" click --text "Confirm"' \
+  'expect --text "Changes saved"' \
+  | agent-hands run
+```
+
 ## Commands
 
 ```bash
