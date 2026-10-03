@@ -24,7 +24,7 @@ The global command is `npm link`ed to `C:\projects\agent-hands`, so edits here
 take effect immediately. `agent-hands version` should print the same as
 package.json. If it does not, run `npm link` from this directory again.
 
-npm has 0.15.1, published 24 Aug 2026. 0.17.0 is committed and unpublished.
+npm has 0.17.4, published 3 Oct 2026 by CI. Check with `npm view agent-hands version`.
 
 ## The four rules the design rests on
 
@@ -205,6 +205,8 @@ USAGE text ~3100 tokens on any unknown command. Not touched.
 
 ## Fixed in agent-win, 10 Sep 2026 — parallel window walking
 
+Superseded 3 Oct 2026: approval no longer uses agent-win at all. See the 0.17.4 section.
+
 Item 3 below (cold approval ~52s) was `session.find_across` in agent-win walking every top-level
 window's tree one after another. uiautomation forbids touching a Control from a thread that did
 not create it, so the fix is a small thread pool (`MAX_WALK_WORKERS = 4`, agent-win's
@@ -231,6 +233,44 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/measure.html`; the hero was captured over CDP with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
+
+## 0.17.4 (3 Oct 2026) — approval without agent-win, frozen Edge tabs
+
+Two reports from the owner, both measured on their Edge 154.
+
+1. **The Allow prompt stopped being clicked on 28 Sep.** The audit log
+   (`~/.agent-browser/humanize/audit/*.jsonl`) shows `approve-clicked` up to
+   27 Sep and none after. The dialog is an OWNED top-level window
+   (`Chrome_WidgetWin_1`), and UIA shows it only inside the Edge window's
+   tree. agent-win's `find` walks that whole tree, page content included,
+   and on a ten-tab profile it hit its 8s budget after "Disable in settings"
+   and before "Allow". `cli/approve.ps1` now finds the dialog with
+   `EnumWindows` and invokes Allow through the UIA client that ships with
+   Windows. The dialog's subtree walks in under 1s. The compiled
+   EnumWindows helper is cached as `~/.agent-browser/humanize/approve-<hash>.dll`,
+   because csc.exe took 14s. This also drops the pip dependency: before, only
+   users who had installed agent-win got auto-approval. agent-win remains
+   for `login --window`.
+2. **`tabs` took 27s, other commands up to 50s.** Edge 154 freezes a woken
+   tab again within 3s of hiding it. The old code woke a frozen tab, handed
+   focus back at once, and every later call hung; `drain()` had no deadline
+   and waited 41s. Now a woken tab stays in front until `drain()`, which
+   restores focus after the command. `drain()` is bounded to 2s. A bare
+   `tabs` picks no page. The tab probe returns once the choice is settled.
+   Waking retries for up to 7.5s, because a heavy tab took 2.6s to thaw.
+   Result: `tabs` 27s -> 2.4s, connect plus one read 48s -> 3.3s.
+
+After the release: `doctor` finds agent-win with a PATH lookup instead of
+starting Python (3.3s -> 0.2s). The spawn stays as the fallback for
+`$AGENT_WIN` and `python -m agent_win`.
+
+Open: while the user is actively switching tabs, Edge sometimes does not wake
+a tab within 7.5s. The command then fails in about 12s with a hint to use
+`--tab`. Before, it hung.
+
+How to trace a slow command: wrap `DaemonCDP.prototype.send` in a scratch
+script and log each CDP method with its duration. That is how both causes
+above were found.
 
 ## Known open, in priority order
 
