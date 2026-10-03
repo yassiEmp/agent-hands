@@ -33,10 +33,25 @@ export function whichSync(name) {
 
 export const hasAgentBrowser = () => whichSync('agent-browser') !== null;
 
-export async function probeEnvironment() {
+// A PATH hit answers without a spawn. The spawn starts Python, which cost 3s
+// on an idle machine and 20s on a loaded one, and doctor is the first command
+// a new user runs. $AGENT_WIN outranks PATH at run time, so when it is set,
+// only the real probe tells which candidate answers.
+async function findAgentWin() {
+  const onPath = !process.env.AGENT_WIN || isDir(process.env.AGENT_WIN)
+    ? whichSync('agent-win') : null;
+  if (onPath) return { how: 'agent-win on PATH' };
   // Lazy: uia.mjs spawns, and nothing but doctor should pay for that.
   const { probe } = await import('./uia.mjs');
-  const win = process.platform === 'win32' ? await probe() : null;
+  return probe();
+}
+
+function isDir(p) {
+  try { return fs.statSync(p).isDirectory(); } catch { return false; }
+}
+
+export async function probeEnvironment() {
+  const win = process.platform === 'win32' ? await findAgentWin() : null;
   const agentBrowser = whichSync('agent-browser');
   return {
     node: nodeCheck(),
