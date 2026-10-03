@@ -243,24 +243,40 @@ export class CDP {
   // authorize every new CDP connection, so a per-invocation socket would ask
   // on every command. One daemon means one prompt per browser run.
   static async attachFlat(port, browserPath, opts = {}) {
-    const { tab, activate = true, key } = opts;
+    const { tab, activate = true, key, page: wantPage = true } = opts;
     const wsUrl = `ws://127.0.0.1:${port}${browserPath}`;
     // Always the daemon. There is deliberately no un-shared variant: a socket
     // that can authorise itself is a second door into a browser holding the
     // user's live session, and the daemon is the only audited one.
     const cdp = await DaemonCDP.open(wsUrl);
+    // Browser-level verbs (tabs) never touch a page. Picking one would probe
+    // every tab and could wake a frozen one, for nothing.
+    if (!wantPage) return cdp;
     // Same reason as attachPerPage: a throw here (no tab matched, a frozen tab,
     // a dead target) leaks the pipe and the process never exits. `--tab typo`
     // used to print its error and hang until the caller killed it.
     try {
       const { targetInfos } = await cdp.send('Target.getTargets');
       const page = await choosePage(cdp, targetInfos, { tab, activate, key });
+      cdp.restoreTo = page.restoreTo;
       cdp.sessionId = page.sessionId;
       cdp.targetId = page.targetId;   // refs bind to a tab, see snapshot.mjs
       cdp.url = page.url;
       cdp.title = page.title;
       cdp.tabWhy = page.why;
-      await enableFocusEmulation(cdp);
+      // The first setup call doubles as a liveness check. Edge 154 freezes a
+      // tab again within seconds of it going to the background, so a tab that
+      // answered the probe as hidden can be frozen by now.
+      if (!(await enableFocusEmulation(cdp)) && activate && !cdp.restoreTo) {
+        const back = page.visibleId !== page.targetId ? page.visibleId : null;
+        if (!(await wake(cdp, page))) {
+          if (back) await cdp.send('Target.activateTarget', { targetId: back });
+          throw new Error(`"${(page.title || page.url).slice(0, 48)}" froze and did not wake when activated.${WAKE_HINT}`);
+        }
+        cdp.restoreTo = back;
+        cdp.tabWhy = `${page.why}, woken`;
+        await enableFocusEmulation(cdp);
+      }
       await clearAutomationHint(cdp);
       return cdp;
     } catch (e) {
@@ -317,7 +333,19 @@ export class CDP {
   }
 
   // Round-trip a cheap call so queued input flushes before the socket closes.
-  async drain() { await this.evaluate('0').catch(() => {}); }
+  // Bounded: a tab the browser froze again never answers, and an unbounded
+  // drain held the CLI open for 41s after the work was done.
+  //
+  // Then hand the foreground back. A tab woken from a freeze stays in front
+  // for the whole command, because Edge 154 freezes it again within 3s of
+  // going to the background. Every call after an early hand-back hung.
+  async drain() {
+    await withDeadline(this.evaluate('0').catch(() => {}), 2000);
+    if (!this.restoreTo) return;
+    const targetId = this.restoreTo;
+    this.restoreTo = null;
+    await withDeadline(this.send('Target.activateTarget', { targetId }, null).catch(() => {}), 2000);
+  }
 
   close() { this.ws.close(); }
 }
@@ -462,9 +490,11 @@ function withDeadline(work, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
+// Resolves true when the tab answered (an error is an answer), undefined when
+// it did not answer within the deadline.
 async function enableFocusEmulation(cdp) {
-  await withDeadline(
-    cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {}), 2000);
+  return withDeadline(
+    cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).then(() => true, () => true), 2000);
 }
 
 // Attaching over CDP sets navigator.webdriver = true, and a page reads it in one
@@ -587,21 +617,22 @@ const INTERNAL = /^(chrome|edge|devtools|about|brave|vivaldi):/;
 // reply hangs forever. A tab that is merely hidden answers normally, so the
 // probe has to distinguish the two rather than assume background means broken.
 async function tabState(cdp, sessionId) {
-  try {
-    const { result } = await Promise.race([
-      cdp.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }, sessionId),
-      new Promise((_, bad) => setTimeout(() => bad(new Error('frozen')), 2500)),
-    ]);
-    return result.value;            // 'visible' | 'hidden'
-  } catch {
-    return 'frozen';
-  }
+  const FROZEN = Symbol('frozen');
+  const answer = await withDeadline(
+    cdp.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }, sessionId)
+      .catch(() => FROZEN),
+    2500);
+  // withDeadline resolves undefined on timeout and clears its timer, so a
+  // probe that lost the race does not hold the process open for 2.5s.
+  if (!answer || answer === FROZEN) return 'frozen';
+  return answer.result.value;       // 'visible' | 'hidden'
 }
 
 // Only Target.activateTarget thaws a frozen tab. Page.setWebLifecycleState
 // returns without thawing it and Emulation.setFocusEmulationEnabled hangs.
-// Activating steals the user's foreground, so put it back straight after: a
-// woken tab keeps answering once it is hidden again.
+// Activating steals the user's foreground. It is put back in drain(), after the
+// command, never straight after the wake: Edge 154 froze the woken tab again
+// within 3s of hiding it, and every call after that hung.
 async function choosePage(cdp, targets, { tab, activate, key }) {
   const pages = targets.filter(t => t.type === 'page');
   if (!pages.length) throw new Error('no page target found. Open a tab first.');
@@ -625,22 +656,17 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
   }
   const candidates = wanted.length ? wanted : pages;
 
-  // Probed together: frozen tabs all time out concurrently instead of adding
-  // 2.5s each. Knowing which tab is visible is also what makes focus
-  // restoration possible later.
-  const probed = await Promise.all(pages.map(async p => {
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: p.targetId, flatten: true });
-    return { ...p, sessionId, state: await tabState(cdp, sessionId) };
-  }));
+  const probed = await probeTabs(cdp, pages, candidates);
   const byId = new Map(probed.map(p => [p.targetId, p]));
   const wantedProbed = candidates.map(c => byId.get(c.targetId));
   const visibleNow = probed.find(p => p.state === 'visible');
+  const visibleId = visibleNow?.targetId ?? null;
 
   const live = wantedProbed.find(p => p.state === 'visible')
     || wantedProbed.find(p => p.state === 'hidden');
   if (live) {
     if (why === 'visible' && live.state === 'hidden') why = 'hidden';
-    return { ...live, why };
+    return { ...live, visibleId, why };
   }
 
   const target = wantedProbed[0];
@@ -653,13 +679,61 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
     );
   }
 
-  await cdp.send('Target.activateTarget', { targetId: target.targetId });
-  const woken = await tabState(cdp, target.sessionId);
-  if (visibleNow && visibleNow.targetId !== target.targetId) {
-    await cdp.send('Target.activateTarget', { targetId: visibleNow.targetId });
+  const restoreTo = visibleNow && visibleNow.targetId !== target.targetId ? visibleNow.targetId : null;
+  if (!(await wake(cdp, target))) {
+    if (restoreTo) await cdp.send('Target.activateTarget', { targetId: restoreTo });
+    throw new Error(`"${name}" stayed frozen after being activated.${WAKE_HINT}`);
   }
-  if (woken === 'frozen') throw new Error(`"${name}" stayed frozen after being activated.`);
-  return { ...target, why: `${why}, woken` };
+  // The caller hands the foreground back in drain(), after the command.
+  return { ...target, restoreTo, visibleId, why: `${why}, woken` };
+}
+
+const WAKE_HINT = '\n  Switch to that tab yourself and retry, or pick another one with --tab <match>.' +
+  '\n  agent-hands tabs lists them without waking any.';
+
+// Bring a tab to the front and wait until it answers. Thawing is not instant:
+// a heavy Vercel tab took 2.6s on Edge 154, just past one probe's 2.5s.
+async function wake(cdp, target) {
+  await cdp.send('Target.activateTarget', { targetId: target.targetId });
+  for (let i = 0; i < 3; i++) {
+    if (await tabState(cdp, target.sessionId) !== 'frozen') return true;
+  }
+  return false;
+}
+
+// Attach to every page and read its visibility, all at once. Returns as soon
+// as the choice is settled, so a frozen tab nobody asked for no longer costs
+// its 2.5s timeout. Settled means: a candidate is visible (only one tab can
+// be), or every candidate answered and the visible tab is known. The visible
+// tab matters even when it is not chosen: it is where focus goes back.
+// Pages still pending at that point are returned with state 'unknown'.
+function probeTabs(cdp, pages, candidates) {
+  const wanted = new Set(candidates.map(c => c.targetId));
+  const results = new Map();
+  return new Promise(resolve => {
+    let left = pages.length;
+    const finish = () => resolve(pages.map(p => results.get(p.targetId) ?? { ...p, state: 'unknown' }));
+    const settled = () => {
+      const done = [...results.values()];
+      const visible = done.find(r => r.state === 'visible');
+      if (visible && wanted.has(visible.targetId)) return true;
+      return Boolean(visible) && [...wanted].every(id => results.has(id));
+    };
+    for (const p of pages) {
+      (async () => {
+        let r;
+        try {
+          const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: p.targetId, flatten: true });
+          r = { ...p, sessionId, state: await tabState(cdp, sessionId) };
+        } catch {
+          r = { ...p, state: 'frozen' };
+        }
+        results.set(p.targetId, r);
+        left -= 1;
+        if (left === 0 || settled()) finish();
+      })();
+    }
+  });
 }
 
 // A new background tab, so the page the user is reading stays where it is.
@@ -687,14 +761,16 @@ export async function newTab(cdp, url) {
 // Every page tab, with the one commands currently go to marked.
 export async function listTabs(cdp) {
   let pages;
-  if (cdp.sessionId) {
+  if (cdp instanceof DaemonCDP) {
     const { targetInfos } = await cdp.send('Target.getTargets', {}, null);
     pages = targetInfos.filter(t => t.type === 'page').map(t => ({ id: t.targetId, title: t.title, url: t.url }));
   } else {
     const all = (await listTargets(cdp.port)) ?? [];
     pages = all.filter(t => t.type === 'page').map(t => ({ id: t.id, title: t.title, url: t.url }));
   }
-  return pages.map(p => ({ ...p, current: p.id === cdp.targetId }));
+  // Connected without a page, the tab commands go to is the remembered one.
+  const current = cdp.targetId ?? recallTab(cdp.key)?.targetId;
+  return pages.map(p => ({ ...p, current: p.id === current }));
 }
 
 // Ground truth about the running browser. Browser.getVersion works on both

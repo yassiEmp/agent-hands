@@ -122,8 +122,8 @@ YOUR OWN BROWSER
   "open" on an attached browser creates a new background tab, so the page the
   user is reading is never navigated away. --here navigates the current tab.
   A hidden tab is driven where it is. A tab frozen by the browser's memory
-  saver cannot answer; it is woken by bringing it forward for a moment, then
-  your previous tab is restored. --no-activate turns that into an error.
+  saver cannot answer; it is woken by bringing it forward for the command,
+  then your previous tab is restored. --no-activate turns that into an error.
 
   \`agent-hands snapshot\` works here and mints its own refs, stored per browser,
   so --ref works on your own browser too. Refs are bound to the tab they came
@@ -456,7 +456,10 @@ const endpoint = { ...resolution.endpoint,
   if ((cmd === 'wait' || cmd === 'expect') && !conditionFrom(args, rest)) {
     throw Object.assign(new Error(conditionUsage(cmd)), { code: 'EUSAGE' });
   }
-  const cdp = shared ?? await CDP.connect(endpoint);
+  // A bare `tabs` reads the tab list and touches no page, so it must not probe
+  // or wake one. With --tab it still picks, because that also re-targets.
+  const pageless = cmd === 'tabs' && !args.tab;
+  const cdp = shared ?? await CDP.connect(pageless ? { ...endpoint, page: false } : endpoint);
   // Sign-in guard. Runs once per connection, after attach and before the verb,
   // so a command that lands on a login page disconnects instead of working
   // there. `login` never attaches, `doctor` is diagnostic, and --force opts out.

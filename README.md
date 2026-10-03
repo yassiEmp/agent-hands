@@ -190,10 +190,12 @@ omitting `Origin` is what works.
 
 A hidden tab is driven where it is and your foreground never changes. A tab
 frozen by the browser's memory saver cannot answer any command, so it is woken
-by bringing it forward for a moment and your previous tab is restored straight
-after. `Page.setWebLifecycleState` does not thaw a frozen tab and
-`Emulation.setFocusEmulationEnabled` hangs on one, so activation is the only
-route. `--no-activate` turns that flicker into an error instead.
+by bringing it forward. It stays in front until the command ends, and then
+your previous tab is restored. Edge 154 freezes a woken tab again within 3s of
+hiding it, so restoring earlier made every later call hang.
+`Page.setWebLifecycleState` does not thaw a frozen tab or keep a woken one
+awake, and `Emulation.setFocusEmulationEnabled` hangs on one, so activation is
+the only route. `--no-activate` turns the tab switch into an error instead.
 
 `--ref` needs refs from `agent-hands snapshot`, which mints and stores its own
 per browser. They work on `--browser` and `--cdp` targets too, and they are the
