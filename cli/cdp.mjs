@@ -268,8 +268,11 @@ export class CDP {
       // The first setup call doubles as a liveness check. Edge 154 freezes a
       // tab again within seconds of it going to the background, so a tab that
       // answered the probe as hidden can be frozen by now.
-      if (!(await enableFocusEmulation(cdp)) && activate && !cdp.restoreTo) {
-        const back = page.visibleId !== page.targetId ? page.visibleId : null;
+      // A missed 2s deadline alone proves nothing (slow is not frozen), so the
+      // full QUIET_MS check decides before anything is brought to the front.
+      if (!(await enableFocusEmulation(cdp)) && activate && !cdp.restoreTo
+          && await tabState(cdp, page.sessionId) === 'frozen') {
+        const back = await visibleInWindowOf(cdp, page.all ? await page.all : [], page.targetId);
         if (!(await wake(cdp, page))) {
           if (back) await cdp.send('Target.activateTarget', { targetId: back });
           throw new Error(`"${(page.title || page.url).slice(0, 48)}" froze and did not wake when activated.${WAKE_HINT}`);
@@ -617,14 +620,22 @@ const INTERNAL = /^(chrome|edge|devtools|about|brave|vivaldi):/;
 // accepts page-session commands and never answers them, so anything awaiting a
 // reply hangs forever. A tab that is merely hidden answers normally, so the
 // probe has to distinguish the two rather than assume background means broken.
+//
+// SLOW IS NOT FROZEN. A busy app answers late: measured 3 Oct 2026 on Edge
+// 154, the user's VISIBLE WhatsApp Web tab took 3.9-4.9s to answer a first
+// evaluate, Play Console 5.6s. The old 2.5s limit called those tabs frozen,
+// "woke" them by switching the user's screen, and still failed. A frozen tab
+// never answers at all, so only a long silence means frozen.
+const QUIET_MS = 10_000;
+
 async function tabState(cdp, sessionId) {
   const FROZEN = Symbol('frozen');
   const answer = await withDeadline(
     cdp.send('Runtime.evaluate', { expression: 'document.visibilityState', returnByValue: true }, sessionId)
       .catch(() => FROZEN),
-    2500);
+    QUIET_MS);
   // withDeadline resolves undefined on timeout and clears its timer, so a
-  // probe that lost the race does not hold the process open for 2.5s.
+  // probe that lost the race does not hold the process open.
   if (!answer || answer === FROZEN) return 'frozen';
   return answer.result.value;       // 'visible' | 'hidden'
 }
@@ -658,17 +669,18 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
   const candidates = wanted.length ? wanted : pages;
   const matches = tab ? wanted.length : 0;
 
-  const probed = await probeTabs(cdp, pages, candidates);
+  const { settled, all } = probeTabs(cdp, pages, candidates);
+  const probed = await settled;
   const byId = new Map(probed.map(p => [p.targetId, p]));
   const wantedProbed = candidates.map(c => byId.get(c.targetId));
-  const visibleNow = probed.find(p => p.state === 'visible');
-  const visibleId = visibleNow?.targetId ?? null;
 
   const live = wantedProbed.find(p => p.state === 'visible')
     || wantedProbed.find(p => p.state === 'hidden');
   if (live) {
     if (why === 'visible' && live.state === 'hidden') why = 'hidden';
-    return { ...live, visibleId, matches, why };
+    detachOthers(cdp, all, live.sessionId);
+    const visibleId = probed.find(p => p.state === 'visible')?.targetId ?? null;
+    return { ...live, visibleId, matches, why, all };
   }
 
   const target = wantedProbed[0];
@@ -681,7 +693,12 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
     );
   }
 
-  const restoreTo = visibleNow && visibleNow.targetId !== target.targetId ? visibleNow.targetId : null;
+  // Waking needs to know where focus goes back, so wait for every probe here.
+  // They all started together, so this costs at most the same QUIET_MS.
+  const everyone = await all;
+  const restoreTo = await visibleInWindowOf(cdp, everyone, target.targetId);
+  const visibleId = restoreTo;
+  detachOthers(cdp, all, target.sessionId);
   if (!(await wake(cdp, target))) {
     if (restoreTo) await cdp.send('Target.activateTarget', { targetId: restoreTo });
     throw new Error(`"${name}" stayed frozen after being activated.${WAKE_HINT}`);
@@ -690,57 +707,83 @@ async function choosePage(cdp, targets, { tab, activate, key }) {
   return { ...target, restoreTo, visibleId, matches, why: `${why}, woken` };
 }
 
+// The tab to hand focus back to: the one the user sees in the SAME window as
+// the tab being woken. Activating a tab only changes its own window, and with
+// several windows open, "the first visible tab" can sit in another one.
+// Restoring that would raise a window the user was not using.
+async function visibleInWindowOf(cdp, probed, targetId) {
+  const windowOf = async id => {
+    try { return (await cdp.send('Browser.getWindowForTarget', { targetId: id }, null)).windowId; }
+    catch { return null; }
+  };
+  const home = await windowOf(targetId);
+  if (home == null) return null;
+  for (const p of probed) {
+    if (p.state !== 'visible' || p.targetId === targetId) continue;
+    if (await windowOf(p.targetId) === home) return p.targetId;
+  }
+  return null;
+}
+
+// Every probe attached a session to a tab, and the shared browser socket keeps
+// them until the browser exits: one per tab per command, piling up. An
+// attached session is also what sets navigator.webdriver on that tab. Drop
+// every session except the one this command drives.
+function detachOthers(cdp, all, keep) {
+  all.then(rs => {
+    for (const r of rs) {
+      if (r.sessionId && r.sessionId !== keep) {
+        cdp.send('Target.detachFromTarget', { sessionId: r.sessionId }, null).catch(() => {});
+      }
+    }
+  });
+}
+
 // The lasting fix is the browser's own exception list. CDP cannot keep a
 // background tab awake: Page.setWebLifecycleState was tested and does not.
-const WAKE_HINT = '\n  Switch to that tab yourself and retry, or pick another one with --tab <match>.' +
+const WAKE_HINT = '\n  Retry once, or pick another tab with --tab <match>.' +
   '\n  agent-hands tabs lists them without waking any.' +
-  '\n  To stop the browser freezing this site, add it to the keep-awake list:' +
+  '\n  If this site keeps freezing, the user MAY add it to the keep-awake list.' +
+  '\n  That is their choice; do not ask on a first failure:' +
   '\n    Edge:   edge://settings/system/managePerformance  ->  "Never put these sites to sleep"' +
   '\n    Chrome: chrome://settings/performance  ->  "Always keep these sites active"';
 
 // Bring a tab to the front and wait until it answers. Thawing is not instant:
-// a heavy Vercel tab took 2.6s on Edge 154, just past one probe's 2.5s.
+// a heavy Vercel tab took 2.6s on Edge 154.
 async function wake(cdp, target) {
   await cdp.send('Target.activateTarget', { targetId: target.targetId });
-  for (let i = 0; i < 3; i++) {
-    if (await tabState(cdp, target.sessionId) !== 'frozen') return true;
-  }
-  return false;
+  return await tabState(cdp, target.sessionId) !== 'frozen';
 }
 
-// Attach to every page and read its visibility, all at once. Returns as soon
-// as the choice is settled, so a frozen tab nobody asked for no longer costs
-// its 2.5s timeout. Settled means: a candidate is visible (only one tab can
-// be), or every candidate answered and the visible tab is known. The visible
-// tab matters even when it is not chosen: it is where focus goes back.
-// Pages still pending at that point are returned with state 'unknown'.
+// Attach to every page and read its visibility, all at once. `settled`
+// resolves as soon as the choice is known, so a slow or frozen tab nobody
+// asked for costs nothing: a candidate answered 'visible', or every candidate
+// answered. Several tabs can be visible, one per window. Pages still pending
+// then are returned with state 'unknown'. `all` resolves when every probe is
+// done, for the callers that need the full picture.
 function probeTabs(cdp, pages, candidates) {
   const wanted = new Set(candidates.map(c => c.targetId));
   const results = new Map();
-  return new Promise(resolve => {
-    let left = pages.length;
-    const finish = () => resolve(pages.map(p => results.get(p.targetId) ?? { ...p, state: 'unknown' }));
-    const settled = () => {
-      const done = [...results.values()];
-      const visible = done.find(r => r.state === 'visible');
-      if (visible && wanted.has(visible.targetId)) return true;
-      return Boolean(visible) && [...wanted].every(id => results.has(id));
-    };
-    for (const p of pages) {
-      (async () => {
-        let r;
-        try {
-          const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: p.targetId, flatten: true });
-          r = { ...p, sessionId, state: await tabState(cdp, sessionId) };
-        } catch {
-          r = { ...p, state: 'frozen' };
-        }
-        results.set(p.targetId, r);
-        left -= 1;
-        if (left === 0 || settled()) finish();
-      })();
+  const snapshot = () => pages.map(p => results.get(p.targetId) ?? { ...p, state: 'unknown' });
+  let settle;
+  const settled = new Promise(r => { settle = r; });
+  const isSettled = () => {
+    const done = [...results.values()].filter(r => wanted.has(r.targetId));
+    return done.some(r => r.state === 'visible') || done.length === wanted.size;
+  };
+  const all = Promise.all(pages.map(async p => {
+    let r;
+    try {
+      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: p.targetId, flatten: true });
+      r = { ...p, sessionId, state: await tabState(cdp, sessionId) };
+    } catch {
+      r = { ...p, state: 'frozen' };
     }
-  });
+    results.set(p.targetId, r);
+    if (isSettled()) settle(snapshot());
+    return r;
+  }));
+  return { settled, all };
 }
 
 // A new background tab, so the page the user is reading stays where it is.

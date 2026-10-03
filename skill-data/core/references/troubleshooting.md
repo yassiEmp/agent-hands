@@ -146,12 +146,17 @@ The browser froze a background tab to save memory. Edge does this to any tab
 the user has not looked at for a while, and again within 3s of hiding a tab
 that was woken. A frozen tab answers no command.
 
-agent-hands wakes the tab by bringing it to the front for the command, then
-gives the user back their tab. If the tab does not wake within 7.5s, the
-command fails with this message. CDP cannot keep a background tab awake.
+A slow tab is not a frozen tab. Busy apps take seconds to answer: WhatsApp Web
+took up to 5s while visible, Play Console 5.6s. agent-hands waits 10s before
+it calls a tab frozen, and it never switches the user's screen for a slow tab.
 
-The lasting fix is the browser's exception list. Ask the user to add each
-site the agent works on:
+A tab silent for 10s is woken: it comes to the front for the command, then
+the user's tab comes back. If it still does not answer, the command fails
+with this message. CDP cannot keep a background tab awake.
+
+Do not ask the user to change browser settings on the first failure. Retry
+once. Only when the same site keeps failing, offer the browser's exception
+list as an option, and say it is the user's choice:
 
 - Edge: `edge://settings/system/managePerformance`, "Never put these sites to sleep"
 - Chrome: `chrome://settings/performance`, "Always keep these sites active"
