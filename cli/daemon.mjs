@@ -42,8 +42,8 @@ async function main() {
   if (await probe(pipe)) process.exit(0);   // someone won the race
 
   // The one and only authorization prompt happens here. The browser draws it in its own window
-  // chrome, so CDP cannot dismiss it and this upgrade just hangs until somebody clicks. agent-win
-  // clicks it for us while the handshake is pending; without agent-win, a human clicks instead.
+  // chrome, so CDP cannot dismiss it and this upgrade just hangs until somebody clicks. On Windows,
+  // approve.mjs clicks it while the handshake is pending; elsewhere, a human clicks instead.
   const ws = new WebSocket(wsUrl);
   const approved = new AbortController();
   record(wsUrl, { ev: 'approve-begin', pid: process.pid, auto: !process.env.AGENT_HANDS_NO_APPROVE });

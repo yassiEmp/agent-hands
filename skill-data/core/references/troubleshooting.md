@@ -101,12 +101,15 @@ The `chrome://inspect` endpoint gates every new CDP connection behind a native
 prompt drawn in the browser's window chrome. CDP cannot see or dismiss it, so
 the websocket upgrade hangs — no error, no 403 — until it is clicked.
 
-agent-win clicks it for you, but it is a SEPARATE Windows-only install and no
-dependency of this package. `pip install agent-win` puts it on PATH, or set
-`AGENT_WIN_HOME` to a checkout; `agent-hands doctor` says whether it was found.
-When it is missing you get one line saying so — click the prompt
-yourself, and note the connection must already be in flight, because the button
-only exists while an upgrade is pending.
+On Windows the relay clicks it for you through the UI Automation client that
+ships with Windows (`cli/approve.ps1`). Nothing extra is installed. If
+PowerShell cannot start, you get one line saying so. Then click the prompt
+yourself. The connection must already be in flight, because the button only
+exists while an upgrade is pending.
+
+Up to 0.17.3 this went through agent-win. Its search walks the whole browser
+window to reach the dialog, and on a heavy Edge profile the walk ran out of
+budget before the Allow button. Approval then stopped with no error.
 
 Before blaming any client, connect a bare websocket to
 `ws://127.0.0.1:<port><uuidPath>`. Every client failure seen so far was the

@@ -5,15 +5,19 @@
 // chrome. CDP cannot see it and cannot dismiss it, so the websocket upgrade just hangs — no error,
 // no 403 — until somebody clicks. Clients with a short handshake timeout give up first.
 //
-// The modal is a normal UI Automation control, so agent-win can invoke it. Authorising that
-// connection is agent-win's ONLY job here. Page, tab and DOM work belongs to this tool.
+// The modal is a normal UI Automation control. approve.ps1 invokes it through the UI Automation
+// client that ships with Windows, so this needs no install. It used to go through agent-win, whose
+// search walks the whole browser window to reach the dialog. On a heavy profile (Edge 154, ten
+// tabs) that walk hit its 8s budget before the Allow button, and approval silently stopped.
+// approve.ps1 finds the dialog by its own window handle instead, in under a second.
 //
-// Everything is best-effort: without agent-win the connect still works, it just waits for a human.
+// Everything is best-effort: if the approver cannot run, the connect still works, it just waits
+// for a human.
 //
 // LOCALE. The dialog is fully translated, so matching "Allow" only works on an English browser.
 // Narrowing is therefore structural first: ClassName is set by Chromium and never translated, so
-// `--class MdTextButton` finds the dialog's buttons in any language (it cut ~200 buttons to 7 on
-// a French Edge). Only then is the affirmative chosen by name.
+// MdTextButton finds the dialog's buttons in any language. Only then is the affirmative chosen
+// by name.
 //
 // WHY NOT PICK BY POSITION. The real dialog has THREE buttons — "Disable in settings", "Allow",
 // "Cancel" — and Allow is neither first nor last. Guessing by order would disable the user's
@@ -23,8 +27,12 @@
 // LIMITATION. The modal names no requester, so this approves ANY pending debugging prompt. Do not
 // run it while a connection you did not start is waiting.
 
-import { agentWin, agentWinMissing } from './uia.mjs';
-export { agentWinMissing };
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // "Allow" as Chromium ships it. Compared case-insensitively, accents intact.
 // An unlisted language is not a failure: it prints the buttons it found so this list can grow.
@@ -37,87 +45,77 @@ const ALLOW = [
   'לאפשר', 'אפשר', 'السماح', 'اسمح', 'اجازه', 'अनुमति दें', 'अनुमति',
 ];
 
-const DIALOG_BUTTON_CLASS = 'MdTextButton';   // Chromium's dialog button, same in every locale
-const BROWSERS = ['msedge.exe', 'chrome.exe', 'brave.exe', 'vivaldi.exe', 'chromium.exe'];
-const POLL_MS = 400;
-// The modal belongs to whichever browser is being connected to. Edge and Chrome
-// cover almost every case, and an unscoped sweep is the fallback when it misses.
-const PROC_HINT = process.env.AGENT_HANDS_BROWSER_PROC || 'msedge.exe';
+const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'approve.ps1');
 
-// How to invoke agent-win, in order of what a real install looks like:
-//   1. $AGENT_WIN  — an explicit command
-//   2. `agent-win` on PATH (pip install, or the repo's shim)
-//   3. `python -m agent_win` (pip install), optionally with $AGENT_WIN_HOME for a git checkout
-// Resolved once, then cached, so a missing tool costs one probe rather than one per poll.
+const CACHE = path.join(os.homedir(), '.agent-browser', 'humanize');
 
-function isAllow(name) {
-  const n = (name || '').trim().toLowerCase().replace(/[.…!]+$/, '');
-  return ALLOW.some(w => n === w || n.startsWith(`${w} `) || n.endsWith(` ${w}`));
+// -EncodedCommand runs the script under any execution policy, where -File is refused on
+// machines set to Restricted. The DLL name carries a hash of the script, so an edit to the
+// helper never loads a stale build.
+function prepare() {
+  const source = fs.readFileSync(SCRIPT, 'utf8');
+  const hash = crypto.createHash('sha1').update(source).digest('hex').slice(0, 12);
+  try { fs.mkdirSync(CACHE, { recursive: true }); } catch { /* the script compiles in memory */ }
+  return {
+    command: Buffer.from(source, 'utf16le').toString('base64'),
+    dll: path.join(CACHE, `approve-${hash}.dll`),
+  };
 }
 
-async function clickPending(log, seen) {
-  // Scope the walk to browser processes. UIA descends the whole tree of every
-  // window it visits, and a browser window carries its entire page, so an
-  // unscoped sweep of this desktop measured 3723ms against 2863ms scoped —
-  // paid on every poll while a modal holds the handshake open.
-  const scoped = await agentWin(['find', '', '--type', 'Button', '--class', DIALOG_BUTTON_CLASS,
-                                 '--process', PROC_HINT, '--json']);
-  const out = scoped ?? await agentWin(['find', '', '--type', 'Button', '--class', DIALOG_BUTTON_CLASS, '--json']);
-  if (!out) {
-    // Silence here is the worst outcome: the connect hangs and nothing says why.
-    if (agentWinMissing() && !seen.has('#missing')) {
-      seen.add('#missing');
-      log?.('agent-win not found, so the browser prompt cannot be clicked for you. ' +
-            'Click "Allow" in the browser now. To automate it, install agent-win ' +
-            '(https://github.com/yassiEmp/agent-win) and put it on PATH, or point ' +
-            'AGENT_WIN_HOME at a checkout.');
-    }
-    return false;
+function report(line, log, seen) {
+  let e;
+  try { e = JSON.parse(line); } catch { return; }
+  if (e.ev === 'clicked') {
+    log?.(`approving the browser prompt (${e.process} "${e.name}")`);
+    return;
   }
-  let matches;
-  try {
-    matches = JSON.parse(out).matches || [];
-  } catch {
-    return false;
-  }
-  const inBrowser = matches.filter(m => BROWSERS.includes((m.process || '').toLowerCase()));
-  if (!inBrowser.length) return false;
-
-  const allow = inBrowser.filter(m => isAllow(m.name));
-  if (!allow.length) {
-    const names = [...new Set(inBrowser.map(m => m.name).filter(Boolean))].join(' | ');
-    if (names && !seen.has(names)) {
-      seen.add(names);
-      log?.(`a browser prompt is open but no button matched a known "Allow": ${names}. ` +
-            `Click it once by hand, or add the word to ALLOW in cli/approve.mjs.`);
-    }
-    return false;
-  }
-  // One button appears per pending attempt, so retries stack them. Clicking an old one approves a
-  // connection that already timed out while the live socket keeps waiting. Click them all.
-  for (const m of allow) {
-    log?.(`approving the browser prompt (${m.ref} "${m.name}")`);
-    await agentWin(['click', m.ref, '-q']);
-  }
-  return true;
+  if (e.ev !== 'unmatched') return;
+  const names = [...new Set(e.names || [])].filter(Boolean).join(' | ');
+  if (!names || seen.has(names)) return;
+  seen.add(names);
+  log?.(`a browser prompt is open but no button matched a known "Allow": ${names}. ` +
+        `Click it once by hand, or add the word to ALLOW in cli/approve.mjs.`);
 }
 
-// Poll for the modal until `signal` aborts — that is, until the socket opens or the caller gives
+// Watch for the modal until `signal` aborts — that is, until the socket opens or the caller gives
 // up. Returns nothing: the socket is the real result, this is a side effect on the desktop.
 export function approveWhilePending(signal, log) {
-  if (process.env.AGENT_HANDS_NO_APPROVE) return;
-  let stopped = false;
+  if (process.env.AGENT_HANDS_NO_APPROVE || process.platform !== 'win32') return;
+  if (signal?.aborted) return;
+  let child;
+  try {
+    const { command, dll } = prepare();
+    child = spawn('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', command], {
+        env: {
+          ...process.env,
+          AGENT_HANDS_DLL: dll,
+          AGENT_HANDS_ALLOW: ALLOW.join('\n'),
+          AGENT_HANDS_PARENT_PID: String(process.pid),
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+  } catch {
+    log?.('could not start the approver, so the browser prompt cannot be clicked for you. ' +
+          'Click "Allow" in the browser now.');
+    return;
+  }
   const seen = new Set();
-  signal?.addEventListener?.('abort', () => { stopped = true; }, { once: true });
-  (async () => {
-    while (!stopped) {
-      try {
-        await clickPending(log, seen);
-      } catch {
-        // a failed probe must never break the connect it is trying to help
-      }
-      if (stopped) return;
-      await new Promise(r => setTimeout(r, POLL_MS));
+  let buf = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', d => {
+    buf += d;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      report(buf.slice(0, nl).trim(), log, seen);
+      buf = buf.slice(nl + 1);
     }
-  })();
+  });
+  // Silence here is the worst outcome: the connect hangs and nothing says why.
+  child.on('error', () => log?.('could not start the approver (powershell.exe). ' +
+                                'Click "Allow" in the browser now.'));
+  // Kill only. The click that opened the socket was written just before, and the pipe still holds
+  // it: destroying stdout here would drop the line the audit log needs.
+  signal?.addEventListener?.('abort', () => child.kill(), { once: true });
 }

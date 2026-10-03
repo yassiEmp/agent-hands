@@ -44,8 +44,8 @@ export async function probeEnvironment() {
     tools: {
       'agent-win': {
         found: Boolean(win), how: win?.how ?? null, optional: true, windowsOnly: true,
-        unlocks: 'clicks the "Allow remote debugging?" prompt for you; login --window',
-        without: 'you click Allow once per browser run; login --window refuses and says why',
+        unlocks: 'login --window',
+        without: 'login --window refuses and says why',
         install: 'pip install agent-win',
       },
       'agent-browser': {

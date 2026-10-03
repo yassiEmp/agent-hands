@@ -62,9 +62,9 @@ it is a complete loop on its own now.
 Neither `agent-browser` nor `agent-win` has to be installed. `agent-hands
 doctor` reports whether each is present and what it unlocks. Without
 `agent-browser` there is no pool: start a browser with `agent-hands launch
-<url>` or attach to the user's own with `--browser`. Without `agent-win` the
-user clicks the "Allow" prompt once per browser run, and `login --window`
-refuses with a message.
+<url>` or attach to the user's own with `--browser`. Without `agent-win`,
+`login --window` refuses with a message. The "Allow remote debugging?" prompt
+is clicked on Windows with or without it.
 
 ## Signing in
 
@@ -350,9 +350,9 @@ Both drive the same browser at the same time. No handoff, no conflict.
 session either tool works; on an external browser, use `agent-hands`.
 
 `agent-win` is the OS lane, not a browser tool. Its only browser job is clicking
-native dialogs that live in the window chrome, where CDP is blind — the
-"Allow remote debugging?" prompt above all. It does that automatically when you
-use `--browser`, so you should never need to call it yourself. **Do not drive
+native dialogs that live in the window chrome, where CDP is blind. The
+"Allow remote debugging?" prompt is not one of them: the relay clicks that one
+itself when you use `--browser`. **Do not drive
 pages with it.** UIA can reach page content, which is exactly the trap: it is
 slower, it breaks on every re-render, and its searches also match the browser's
 own chrome and your terminal's on-screen text.

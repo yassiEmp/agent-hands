@@ -86,7 +86,7 @@ Two other tools are optional. `doctor` reports whether each one is present.
 
 | Tool | What it unlocks | Without it |
 |---|---|---|
-| [agent-win](https://github.com/yassiEmp/agent-win), Windows only, `pip install agent-win` | clicks the "Allow remote debugging?" prompt for you; `login --window` | you click Allow once per browser run; `login --window` refuses and says why |
+| [agent-win](https://github.com/yassiEmp/agent-win), Windows only, `pip install agent-win` | `login --window` | `login --window` refuses and says why |
 | [agent-browser](https://github.com/vercel-labs/agent-browser) | pooled throwaway sessions via `--session` | `agent-hands launch`, `--browser` or `--cdp` |
 
 First run with nothing else installed:
@@ -161,27 +161,14 @@ no error until somebody clicks. Clients with a short handshake timeout give up
 first — `playwright-cli` abandons it after 30s.
 
 Two mitigations. A small background relay holds the one socket, so you approve
-once per browser run rather than once per command. And **if you separately install
-[agent-win](https://github.com/yassiEmp/agent-win)**, the prompt is clicked for you
-while the handshake is pending, so a connect needs no human at all.
+once per browser run rather than once per command. And on Windows the relay
+clicks the prompt for you while the handshake is pending, so a connect needs no
+human at all. It uses the UI Automation client that ships with Windows, through
+PowerShell, so there is nothing to install.
 
-agent-win is a Windows-only Python tool and is **not** a dependency of this
-package — nothing installs it for you. It is found in this order:
-
-1. `$AGENT_WIN` — an explicit command
-2. `agent-win` on `PATH`
-3. `python -m agent_win`, with `$AGENT_WIN_HOME` pointing at a git checkout
-
-```bash
-agent-hands doctor --browser edge                      # if agent-win is on PATH
-AGENT_WIN_HOME=/path/to/agent-win agent-hands doctor --browser edge
-```
-
-A pip install puts `agent-win` on PATH and needs no environment variable at all.
-
-Without it nothing breaks: the connect waits for you to click, and says so once
-rather than hanging silently. `AGENT_HANDS_NO_APPROVE=1` disables it outright.
-On macOS and Linux there is no such prompt, so none of this applies.
+If PowerShell cannot start, nothing breaks: the connect waits for you to click,
+and says so once rather than hanging silently. `AGENT_HANDS_NO_APPROVE=1`
+disables auto-approval outright. The auto-click is Windows only.
 
 That approver works in any UI language. It finds the dialog by Chromium's
 `MdTextButton` class, which is never translated, then picks the affirmative from
