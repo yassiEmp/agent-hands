@@ -48,8 +48,11 @@ npm has 0.17.6, published 3 Oct 2026 by CI. Check with `npm view agent-hands ver
 ## Measured facts you should not re-derive
 
 - `navigator.webdriver` is set by the LAUNCH, not by attaching:
-  `--enable-automation` true, `chrome://inspect` ephemeral port true,
-  a bare `--remote-debugging-port=N` **false**, `agent-hands launch` false.
+  `--enable-automation` true, a bare `--remote-debugging-port=N` **false**,
+  `agent-hands launch` false. The `chrome://inspect` toggle measured true on
+  Chrome 151, and **false** on 4 Oct 2026 on Edge 153 and current Chrome:
+  with the socket open, with a session attached, on a page loaded while
+  attached, and after detach. Re-measure before trusting either value.
 - `Emulation.setAutomationOverride {enabled:false}` returns `{}` and does
   nothing about it. The working shim is `Page.enable` +
   `addScriptToEvaluateOnNewDocument` returning boolean **false** — `undefined`
@@ -246,11 +249,17 @@ the url is not sign-in-like, no visible password field, no visible "Sign in" or
 "Continue with" button, at least 40 chars of text, held for 3 polls (2.1 s).
 `--url` / `--text` replace the rule. Default timeout 600 s, exit 7.
 
-Tested on a launched Edge (in-place path): sign-in in 9 s, already-signed-in in
-2 s, timeout exit 7. Not yet tested on an attached browser (new-tab path).
-Open question: on an attached browser the page sees `navigator.webdriver` while
-the human types. Google sign-in can refuse that. If it does, `handoff` must
-detach for the wait.
+On a browser reached through the relay, the tab carries no session while the
+human types. `handoff` reads url and title from `Target.getTargets`, and
+attaches for one read only when the url leaves the sign-in set (or every 10 s
+on an unchanged page). It also skips the webdriver mask: the getter is already
+false there (see measured facts), and the mask is a non-native getter.
+
+Tested 4 Oct 2026. Launched Edge: sign-in 9 s, already-signed-in 2 s, timeout
+exit 7. Relay route (throwaway Chrome with the inspect toggle): `attached` was
+false at every 1 s sample through the wait, sign-in found 2 s after the page
+changed, `--url`, no-url, timeout and a closed tab all behave. Not yet run on
+the owner's own Edge.
 
 ## 0.17.6 (3 Oct 2026) — slow is not frozen, and `open` keeps your tabs
 

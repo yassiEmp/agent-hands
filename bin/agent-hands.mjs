@@ -8,8 +8,8 @@ import '../cli/require-node.mjs';   // exits on Node < 22 before anything below 
 import { readFileSync, createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import { Readable } from 'node:stream';
-import { CDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint, newTab, listTabs } from '../cli/cdp.mjs';
-import { renderTabs } from '../cli/tab.mjs';
+import { CDP, DaemonCDP, devtoolsPort, profileDir, browserInfo, resolveEndpoint, newTab, listTabs } from '../cli/cdp.mjs';
+import { renderTabs, remember as rememberTab } from '../cli/tab.mjs';
 import { moveTo, clickAt, dragTo, typeText, pressKey, scrollBy, resolveTarget, resolveRef, selectAll, readPos, KEYS } from '../cli/gestures.mjs';
 import { listSkills, getSkill } from '../cli/skills.mjs';
 import { sleep, lognormal } from '../cli/motion.mjs';
@@ -25,7 +25,7 @@ import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { probeEnvironment, renderEnvironment, hasAgentBrowser } from '../cli/env.mjs';
 import { loginFlow } from '../cli/login.mjs';
-import { waitForHuman, DEFAULT_HANDOFF_S } from '../cli/handoff.mjs';
+import { waitForHuman, prepareDetached, waitDetached, DEFAULT_HANDOFF_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
 
@@ -474,7 +474,9 @@ const endpoint = { ...resolution.endpoint,
   }
   // A bare `tabs` reads the tab list and touches no page, so it must not probe
   // or wake one. With --tab it still picks, because that also re-targets.
-  const pageless = cmd === 'tabs' && !args.tab;
+  const pageless = cmd === 'tabs' && !args.tab
+    // handoff opens its own tab, so probing the user's tabs would only touch them.
+    || (cmd === 'handoff' && Boolean(rest[0]) && !args.flags.here);
   const cdp = shared ?? await CDP.connect(pageless ? { ...endpoint, page: false } : endpoint);
   if (!shared) warnTabMatches(args, cdp);
   // Sign-in guard. Runs once per connection, after attach and before the verb,
@@ -679,19 +681,23 @@ const endpoint = { ...resolution.endpoint,
       // the page stops looking like a sign-in surface.
       case 'handoff': {
         const url = rest[0];
-        if (url) {
-          if (cdp.sessionId && !args.flags.here) await newTab(cdp, url);
-          else await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
-        }
-        if (cdp.targetId) await cdp.send('Target.activateTarget', { targetId: cdp.targetId }, null).catch(() => {});
-        cdp.restoreTo = null;   // drain must not take the foreground back from the human
         const timeoutS = args.flags.timeout ?? DEFAULT_HANDOFF_S;
         const condition = args.flags.url || args.flags.text ? conditionFrom(args, []) : null;
-        if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab…`);
-        const r = await waitForHuman(cdp, {
-          condition, timeoutMs: timeoutS * 1000,
-          onTick: ms => { if (!args.quiet && ms >= 60000 && ms % 60000 < 700) console.error(`  still waiting (${Math.round(ms / 60000)} min)`); },
-        });
+        const onTick = ms => { if (!args.quiet && ms >= 60000 && ms % 60000 < 700) console.error(`  still waiting (${Math.round(ms / 60000)} min)`); };
+        // Through the relay the tab carries no session while the human types.
+        // A browser launched here has one socket per page and nothing to hide.
+        let r;
+        if (cdp instanceof DaemonCDP) {
+          const targetId = await prepareDetached(cdp, { url, here: args.flags.here });
+          rememberTab(cdp.key, { targetId, title: '', url: url ?? cdp.url });
+          if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab (nothing attached)…`);
+          r = await waitDetached(cdp, targetId, { condition, timeoutMs: timeoutS * 1000, onTick });
+        } else {
+          if (url) await cdp.send('Page.navigate', { url });
+          if (cdp.targetId) await cdp.send('Target.activateTarget', { targetId: cdp.targetId }, null).catch(() => {});
+          if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab…`);
+          r = await waitForHuman(cdp, { condition, timeoutMs: timeoutS * 1000, onTick });
+        }
         if (!r.ok) {
           throw Object.assign(new Error(
             `no sign-in after ${timeoutS}s.\n  page now: "${(r.title || '').slice(0, 60)}" ${r.url}\n` +

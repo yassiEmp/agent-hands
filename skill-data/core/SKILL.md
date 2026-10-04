@@ -113,10 +113,11 @@ agent-hands handoff                                          # the current tab
 
 3. Continue on the same tab. `handoff` remembers it, so the next command lands there.
 
-`handoff` sends no input. It reads the page every 0.7 s and returns when the
-url no longer looks like a sign-in url, and no password field and no "Sign in"
-or "Continue with" button is visible, for 2 s. Use `--url` or `--text` when you
-know the page that follows the sign-in. The default timeout is 600 s
+`handoff` sends no input. It returns when the url no longer looks like a
+sign-in url, and no password field and no "Sign in" or "Continue with" button
+is visible, for 2 s. On your own browser the tab carries no debugging session
+while the user types: `handoff` watches url and title from the tab list, and
+attaches only for one read to confirm. Use `--url` or `--text` when you know the page that follows the sign-in. The default timeout is 600 s
 (`--timeout <s>`). Exit 7 on timeout: run `agent-hands handoff` again to keep
 waiting on the same tab.
 
