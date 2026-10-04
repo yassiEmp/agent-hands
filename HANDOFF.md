@@ -234,6 +234,24 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (4 Oct 2026) — `handoff`, the human signs in for the agent
+
+An agent with no credentials opened the Inworld login in a background tab,
+then asked the user to sign in and reply "I'm in". The tab was hard to find,
+and the agent idled on a chat reply.
+
+`agent-hands handoff <url>` opens a new tab, brings it to the front, and polls
+until the page stops looking like a sign-in page. It sends no input. Rule:
+the url is not sign-in-like, no visible password field, no visible "Sign in" or
+"Continue with" button, at least 40 chars of text, held for 3 polls (2.1 s).
+`--url` / `--text` replace the rule. Default timeout 600 s, exit 7.
+
+Tested on a launched Edge (in-place path): sign-in in 9 s, already-signed-in in
+2 s, timeout exit 7. Not yet tested on an attached browser (new-tab path).
+Open question: on an attached browser the page sees `navigator.webdriver` while
+the human types. Google sign-in can refuse that. If it does, `handoff` must
+detach for the wait.
+
 ## 0.17.6 (3 Oct 2026) — slow is not frozen, and `open` keeps your tabs
 
 From a bug report written by an agent driving WhatsApp Web, Vercel and Play
