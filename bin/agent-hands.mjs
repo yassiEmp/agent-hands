@@ -25,6 +25,7 @@ import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { probeEnvironment, renderEnvironment, hasAgentBrowser } from '../cli/env.mjs';
 import { loginFlow } from '../cli/login.mjs';
+import { waitForHuman, DEFAULT_HANDOFF_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
 
@@ -55,6 +56,7 @@ COMMANDS
   use [<n>|--cdp <port>]      pin a browser; later commands need no target flag
   launch <url> [--exe path]   start a browser with the right flags, print its port
   login @e2 @e3 @e5           fill a form with refs YOU chose; see SIGNING IN
+  handoff <url>               no credentials? the human signs in, you resume - see SIGNING IN
   run [--file f] [--gap ms]   MANY commands, ONE connection - see BATCH below
   browsers                    list every browser and whether it is reachable
   snapshot [--max <n>]        ref-labelled tree of what is on the page
@@ -233,6 +235,20 @@ SIGNING IN
   tree (--force-renderer-accessibility, which launch passes); it says so plainly
   when the tree is withheld.
 
+  NO CREDENTIALS? HAND THE SIGN-IN TO THE HUMAN. Never ask the user for a
+  password, and never ask them to come back and say "done":
+
+    agent-hands handoff https://app.example.com/login
+
+  It opens the url in a new tab, brings that tab to the front, and returns once
+  the page stops looking like a sign-in page. The user signs in and the command
+  returns by itself. The tab is remembered, so your next command lands there.
+  Tell the user BEFORE you run it, in one line: "Sign in in the tab I put in
+  front of you. I continue by myself when you are in."
+    --url /dashboard  or  --text "Projects"   end on this instead of the guess
+    --timeout <s>     default ${DEFAULT_HANDOFF_S}. Your shell's own timeout must be longer.
+    no <url>          hand off the current tab. Exit 7 on timeout.
+
 CHALLENGES
   A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
   tool tries to defeat. Those stacks score behaviour and correlate identity
@@ -403,9 +419,9 @@ const TAB_WHY = {
 };
 // doctor is a diagnostic and must still answer on a login page; challenge is
 // how you inspect one safely; login never attaches in the first place.
-const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect', 'front']);
+const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect', 'front', 'handoff']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill', 'drag']);
-const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect', 'front']);
+const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect', 'front', 'handoff']);
 
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
@@ -658,6 +674,34 @@ const endpoint = { ...resolution.endpoint,
         return { data: { visibility: vis }, human: `✓ front — tab is ${vis}` };
       }
 
+      // The agent has no credentials, so the human signs in. The tab comes to
+      // the front because the human must see it; then this only reads until
+      // the page stops looking like a sign-in surface.
+      case 'handoff': {
+        const url = rest[0];
+        if (url) {
+          if (cdp.sessionId && !args.flags.here) await newTab(cdp, url);
+          else await cdp.send('Page.navigate', { url }, cdp.sessionId ?? undefined);
+        }
+        if (cdp.targetId) await cdp.send('Target.activateTarget', { targetId: cdp.targetId }, null).catch(() => {});
+        cdp.restoreTo = null;   // drain must not take the foreground back from the human
+        const timeoutS = args.flags.timeout ?? DEFAULT_HANDOFF_S;
+        const condition = args.flags.url || args.flags.text ? conditionFrom(args, []) : null;
+        if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab…`);
+        const r = await waitForHuman(cdp, {
+          condition, timeoutMs: timeoutS * 1000,
+          onTick: ms => { if (!args.quiet && ms >= 60000 && ms % 60000 < 700) console.error(`  still waiting (${Math.round(ms / 60000)} min)`); },
+        });
+        if (!r.ok) {
+          throw Object.assign(new Error(
+            `no sign-in after ${timeoutS}s.\n  page now: "${(r.title || '').slice(0, 60)}" ${r.url}\n` +
+            '  To keep waiting on the same tab: agent-hands handoff --timeout <s>'), { code: 'EWAIT' });
+        }
+        const state = r.already ? 'already-signed-in' : 'signed-in';
+        return { data: { state, url: r.url, title: r.title, waitedMs: r.waitedMs },
+                 human: `✓ ${state} — "${(r.title || '').slice(0, 60)}" ${r.url}  (${(r.waitedMs / 1000).toFixed(0)}s)` };
+      }
+
       case 'tabs': {
         const tabs = await listTabs(cdp);
         return { data: { count: tabs.length, tabs: tabs.map(t => ({ title: t.title, url: t.url, current: t.current })) },
@@ -696,7 +740,7 @@ const endpoint = { ...resolution.endpoint,
 
 // Read-only verbs emit no input event, so no site can observe their timing and
 // nothing needs pacing before them.
-const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs', 'wait', 'expect', 'front']);
+const READ_ONLY = new Set(['text', 'snapshot', 'doctor', 'challenge', 'where', 'tabs', 'wait', 'expect', 'front', 'handoff']);
 
 // A batch line is just CLI arguments. That is the whole design: an agent that
 // can use this CLI can already write a batch, and every verb added later works

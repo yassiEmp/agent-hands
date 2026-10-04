@@ -96,6 +96,36 @@ So an open debugging port is not itself the problem. The problem is
 `--enable-automation`, which most automation launchers pass, and the
 `chrome://inspect` route.
 
+### No credentials: hand the sign-in to the user
+
+When you have no credentials, the user signs in and you wait for the page. Do
+not ask for a password. Do not ask the user to come back and say "done".
+
+1. Tell the user in one line, BEFORE the command: "Sign in in the tab I put
+   in front of you. I continue by myself when you are in."
+2. Run the command. It blocks until the user is signed in:
+
+```bash
+agent-hands handoff https://app.example.com/login            # new tab, brought to front
+agent-hands handoff https://app.example.com/login --url /dashboard   # exact end condition
+agent-hands handoff                                          # the current tab
+```
+
+3. Continue on the same tab. `handoff` remembers it, so the next command lands there.
+
+`handoff` sends no input. It reads the page every 0.7 s and returns when the
+url no longer looks like a sign-in url, and no password field and no "Sign in"
+or "Continue with" button is visible, for 2 s. Use `--url` or `--text` when you
+know the page that follows the sign-in. The default timeout is 600 s
+(`--timeout <s>`). Exit 7 on timeout: run `agent-hands handoff` again to keep
+waiting on the same tab.
+
+Your shell tool has its own timeout, often 120 s. Set it longer than
+`--timeout`, or run the command in the background, or the wait dies early.
+
+`state` in the `--json` result is `already-signed-in` when the url redirected
+straight past the sign-in page. Then the user has nothing to do.
+
 ### The CLI never guesses which box is which
 
 A form can label its fields anything, in any language. A wrong guess types a
@@ -413,6 +443,7 @@ agent-hands drag --xy 300 300 --to-xy 500 420   # press, travel held, release: s
 agent-hands press Backspace --times 20     # one process, not twenty
 agent-hands scroll 600                     # negative scrolls up
 agent-hands where                          # last cursor position
+agent-hands handoff <url>                  # no credentials: the user signs in, you resume
 agent-hands doctor                         # is the session reachable?
 ```
 
