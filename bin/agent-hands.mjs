@@ -30,6 +30,7 @@ import { loginFlow } from '../cli/login.mjs';
 import { insertText, clipboardPaste, PASTE_OVER } from '../cli/paste.mjs';
 import { register as registerTypist, running as typists, order as orderTypist } from '../cli/hurry.mjs';
 import { storeKey } from '../cli/cdp.mjs';
+import { noteAfterRun, starCommand } from '../cli/star.mjs';
 import { handoffSocket, runHandoff, DEFAULT_HANDOFF_S, DEFAULT_WAIT_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
@@ -106,6 +107,7 @@ OPTIONS
                      either, text over ${PASTE_OVER} chars is pasted, as a person would
   --from <file>      type/fill: the text from a file. --from env:NAME reads a variable
   hurry              a running type/fill pastes the rest at once
+  star               like the tool? how to help a solo developer (and how to hide the note)
   env AGENT_HANDS_SPEED and AGENT_HANDS_PASTE_OVER change the two defaults
   --pause-on-challenge   stop on an anti-bot challenge and wait for the human
   --challenge-wait <s>   how long to wait for you to clear it (default 180)
@@ -420,6 +422,10 @@ function parseArgs(argv) {
     else if (a === '--project') out.flags.projectScope = true;
     else if (a === '--clear') out.flags.clear = true;
     else if (a === '--start') out.flags.start = true;
+    else if (a === '--open') out.flags.open = true;
+    else if (a === '--x') out.flags.x = true;
+    else if (a === '--off') out.flags.off = true;
+    else if (a === '--on') out.flags.on = true;
     else if (a === '--paste') out.flags.paste = true;
     else if (a === '--keys') out.flags.keys = true;
     else if (a === '--from') out.flags.from = argv[++i];
@@ -1472,6 +1478,16 @@ async function main() {
     const st = staleness();
     if (st.stale) process.on('exit', () => console.error(banner(st)));
   }
+
+  // The star note: stderr only, after a clean exit, and rare (see cli/star.mjs).
+  if (cmd !== 'star' && !args.quiet && !args.flags.noHints) {
+    process.on('exit', code => {
+      if (code || process.exitCode) return;
+      const note = noteAfterRun();
+      if (note) console.error(note);
+    });
+  }
+  if (cmd === 'star') return starCommand(args);
 
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') return console.log(USAGE);
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') return console.log(VERSION);

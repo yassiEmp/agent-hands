@@ -229,6 +229,15 @@ Does not defeat Cloudflare Turnstile, DataDome, or PerimeterX — those combine
 behaviour with canvas, WebGL and TLS fingerprinting. `'webdriver' in navigator`
 still returns `true`; hiding its value is the browser's init script, not this.
 
+## Support
+
+agent-hands is built by one developer, in spare time. If it saved you time, a
+[star on GitHub](https://github.com/yassiEmp/agent-hands) helps other people
+find it, and you can [follow me on X](https://x.com/yassi_yari) for updates.
+
+The CLI prints a one-line note about this on the first run and after long use.
+`agent-hands star --off` turns it off for good.
+
 ## License
 
 MIT
