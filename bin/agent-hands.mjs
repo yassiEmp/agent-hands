@@ -27,6 +27,9 @@ import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { probeEnvironment, renderEnvironment, hasAgentBrowser } from '../cli/env.mjs';
 import { loginFlow } from '../cli/login.mjs';
+import { insertText, clipboardPaste, PASTE_OVER } from '../cli/paste.mjs';
+import { register as registerTypist, running as typists, order as orderTypist } from '../cli/hurry.mjs';
+import { storeKey } from '../cli/cdp.mjs';
 import { handoffSocket, runHandoff, DEFAULT_HANDOFF_S, DEFAULT_WAIT_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
@@ -99,6 +102,11 @@ OPTIONS
   --here             open: navigate the current tab instead of a new one
   --no-activate      never bring a frozen tab to the front; error instead
   --speed <n>        1 = human, 1.6 = brisk, 0.7 = slow
+  --paste / --keys   type/fill: paste the text, or type it key by key. Without
+                     either, text over ${PASTE_OVER} chars is pasted, as a person would
+  --from <file>      type/fill: the text from a file. --from env:NAME reads a variable
+  hurry              a running type/fill pastes the rest at once
+  env AGENT_HANDS_SPEED and AGENT_HANDS_PASTE_OVER change the two defaults
   --pause-on-challenge   stop on an anti-bot challenge and wait for the human
   --challenge-wait <s>   how long to wait for you to clear it (default 180)
   --json             machine-readable output — for agents
@@ -356,7 +364,7 @@ PACING IS NOT YOURS TO WRITE
   only slows the batch.`;
 
 function parseArgs(argv) {
-  const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: 1, json: false, quiet: false, _: [], flags: {} };
+  const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: Number(process.env.AGENT_HANDS_SPEED) || 1, json: false, quiet: false, _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--session') { out.session = argv[++i]; out.explicitSession = true; }
@@ -412,6 +420,9 @@ function parseArgs(argv) {
     else if (a === '--project') out.flags.projectScope = true;
     else if (a === '--clear') out.flags.clear = true;
     else if (a === '--start') out.flags.start = true;
+    else if (a === '--paste') out.flags.paste = true;
+    else if (a === '--keys') out.flags.keys = true;
+    else if (a === '--from') out.flags.from = argv[++i];
     else if (a === '--wait') out.flags.wait = true;
     else if (a === '--passkey') out.flags.passkey = true;
     else if (a === '--passkey-label') { out.flags.passkey = true; out.flags.passkeyLabel = argv[++i]; }
@@ -435,6 +446,78 @@ const TAB_WHY = {
 const GUARD_EXEMPT = new Set(['doctor', 'challenge', 'login', 'launch', 'browsers', 'audit', 'update', 'where', 'tabs', 'wait', 'expect', 'front', 'handoff']);
 const NEEDS_TARGET = new Set(['move', 'hover', 'click', 'fill', 'drag']);
 const NEEDS_BROWSER = new Set([...NEEDS_TARGET, 'type', 'press', 'scroll', 'doctor', 'snapshot', 'text', 'open', 'challenge', 'tabs', 'wait', 'expect', 'front', 'handoff']);
+
+// Keys for a sentence, a paste for a document, as a person does it.
+// --keys and --paste decide it outright; otherwise length decides.
+const MAX_TYPING_SPEED = 3;     // ~190 wpm at speed 3, the top of human typing
+
+async function putText(cdp, text, speed, args) {
+  const f = args.flags;
+  const n = [...text].length;
+  const paste = f.paste || (!f.keys && n > PASTE_OVER);
+  if (paste) {
+    const why = f.paste ? 'asked' : 'long text';
+    // Rich editors expect a real Ctrl+V. A secret never goes on the clipboard:
+    // Windows clipboard history would keep it.
+    const rich = !f.secret && await cdp.evaluate('!!document.activeElement?.isContentEditable').catch(() => false);
+    const t = rich ? await clipboardPaste(cdp, text, speed) : await insertText(cdp, text, speed);
+    return { ...t, why };
+  }
+  const s = Math.min(speed, MAX_TYPING_SPEED);
+  const etaS = Math.round(n * 0.18 / s);
+  if (etaS >= 20 && !args.quiet) {
+    console.error(`  typing ${n} chars, about ${etaS}s. To paste the rest from another shell: agent-hands hurry`);
+  }
+  const control = registerTypist(cdp.key, n);
+  try {
+    const t = await typeText(cdp, text, s, control);
+    const why = t.pasted ? 'hurried' : s < speed ? `speed capped at ${MAX_TYPING_SPEED}` : null;
+    return { ...t, method: t.pasted ? 'keys+paste' : 'keys', ...(why && { why }) };
+  } finally {
+    control.end();
+  }
+}
+
+// --from notes.md reads a file; --from env:API_KEY reads a variable. Either keeps
+// a long document or a secret out of the command line and the shell history.
+function valueOf(args, positional) {
+  const from = args.flags.from;
+  if (!from) return positional ?? '';
+  const bad = m => { throw Object.assign(new Error(`--from ${from}: ${m}`), { code: 'EUSAGE' }); };
+  if (from.startsWith('env:')) {
+    const v = process.env[from.slice(4)];
+    if (v === undefined) bad('that variable is not set.');
+    args.flags.secret = true;
+    return v;
+  }
+  try { return readFileSync(from, 'utf8'); } catch (e) { return bad(e.code || e.message); }
+}
+
+const describeText = t => `${t.chars} chars, ` + ({ keys: 'typed', paste: 'pasted', clipboard: 'pasted with Ctrl+V',
+  'keys+paste': `typed ${t.typed}, pasted the rest` }[t.method] ?? t.method) + (t.why ? ` (${t.why})` : '') + ` / ${t.ms}ms`;
+
+// Tells a running type or fill to paste the rest. No browser is touched.
+function hurryCommand(args) {
+  const explicit = args.cdp || args.browser || args.userDataDir || args.explicitSession;
+  let key = null;
+  if (explicit) {
+    try { key = storeKey({ cdp: args.cdp, browser: args.browser, userDataDir: args.userDataDir, session: args.session }); }
+    catch { key = null; }
+  }
+  const list = typists(key);
+  if (!list.length) {
+    const msg = 'nothing is typing right now.';
+    return console.log(args.json ? JSON.stringify({ ok: false, command: 'hurry', error: msg }) : `✗ ${msg}`);
+  }
+  if (list.length > 1 && !explicit) {
+    throw Object.assign(new Error('several type commands are running:\n' +
+      list.map(t => `  pid ${t.pid}  ${t.key}  ${t.done}/${t.total} chars`).join('\n') +
+      '\n  Name the browser (--cdp, --browser, --session) so only yours is hurried.'), { code: 'EUSAGE' });
+  }
+  for (const t of list) orderTypist(t.pid, { paste: true });
+  if (args.json) return console.log(JSON.stringify({ ok: true, command: 'hurry', typists: list }));
+  return console.log(list.map(t => `✓ the rest will be pasted — ${t.done}/${t.total} chars were typed`).join('\n'));
+}
 
 async function run(args, cmd, rest, shared) {
   const { session, speed } = args;
@@ -553,8 +636,8 @@ const endpoint = { ...resolution.endpoint,
       case 'type': {
         // type aims at whatever holds focus, which may be nothing at all.
         await requireEditable(cdp, null, 'type');
-        const t = await typeText(cdp, rest[0] ?? '', speed);
-        return { data: t, human: `✓ type ${t.chars} chars / ${t.ms}ms` };
+        const t = await putText(cdp, valueOf(args, rest[0]), speed, args);
+        return { data: t, human: `✓ type ${describeText(t)}` };
       }
       case 'fill': {
         // Check the element under the aim point BEFORE clicking. A <form>, a
@@ -572,16 +655,16 @@ const endpoint = { ...resolution.endpoint,
         if (replaced) await selectAll(cdp);
         else await pressKey(cdp, 'End', speed);
         // With --ref or --xy there is no selector positional, so the text is first.
-        const text = (args.flags.ref || hasXY || args.flags.label ? rest[0] : rest[1]) ?? '';
+        const text = valueOf(args, args.flags.ref || hasXY || args.flags.label ? rest[0] : rest[1]);
         // selectAll only highlights. Typing over the selection replaces it, but
         // typing nothing leaves it highlighted and the old value in place — so
         // `fill "#x" ""`, the documented way to clear a field, reported
         // replaced:true and changed nothing. Delete the selection explicitly.
         if (replaced && text === '') await pressKey(cdp, 'Delete', speed);
-        const t = await typeText(cdp, text, speed);
+        const t = await putText(cdp, text, speed, args);
         return {
           data: { ...t, tag: target.tag, replaced },
-          human: `✓ fill ${target.tag} at ${at} — ${replaced ? 'replaced' : 'appended'} ${t.chars} chars / ${t.ms}ms`,
+          human: `✓ fill ${target.tag} at ${at} — ${replaced ? 'replaced' : 'appended'}, ${describeText(t)}`,
         };
       }
       case 'press': {
@@ -1114,12 +1197,13 @@ function requireArgs(cmd, rest, args, hasXY) {
   }
   // An explicit "" is the documented way to clear a field and stays legal.
   // A missing positional is a typo, and typing nothing is never what it meant.
-  if (cmd === 'fill' && ((withRef || args.flags.label) ? rest[0] : rest[1]) === undefined) {
+  const sourced = args.flags.from;
+  if (cmd === 'fill' && !sourced && ((withRef || args.flags.label) ? rest[0] : rest[1]) === undefined) {
     bad('fill needs the text to type, after the target.' + NL
       + '  fill "#email" "you@example.com"   |   fill --ref @e2 "you@example.com"' + NL
       + '  Pass "" to clear the field on purpose.');
   }
-  if (cmd === 'type' && rest[0] === undefined) {
+  if (cmd === 'type' && !sourced && rest[0] === undefined) {
     bad('type needs the text to type.  type "hello"');
   }
   if (cmd === 'press' && !rest[0]) {
@@ -1496,6 +1580,8 @@ async function main() {
   }
 
   if (cmd === 'use') return useCommand(args, rest);
+
+  if (cmd === 'hurry') return hurryCommand(args);
 
   if (cmd === 'run') return runBatch(args);
 

@@ -237,6 +237,25 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — long text: paste, hurry, --from
+
+Typing is ~180 ms a character at speed 1, so a long text outlived the agent's
+shell. `type`/`fill` now paste over 300 chars (`AGENT_HANDS_PASTE_OVER`).
+`--paste` and `--keys` force either way. Measured on Edge with an
+event-logging page:
+
+- A CDP Ctrl+V (`rawKeyDown` with modifier 2) runs Chromium's real paste and
+  reads the SYSTEM clipboard: the page got a trusted `paste` event. So never
+  send Ctrl+V without putting the text on the clipboard first.
+- Plain field: `Input.insertText`, one trusted `input:insertText`, no clipboard.
+- `contenteditable`: real Ctrl+V. One PowerShell helper holds the user's text
+  and restores it only if the clipboard still holds the agent's text. Four
+  separate PowerShell starts took 8.5 s; one helper takes 2.3 s. Restored: yes.
+- `--from env:NAME` never uses the clipboard (Windows clipboard history).
+- `hurry`: a typist registers `typing-<pid>.json` and reads `hurry-<pid>.json`
+  every 8 chars. 216 chars: typed 23, pasted 193, 5 s instead of 39 s.
+- Keystroke speed is capped at 3 (`MAX_TYPING_SPEED`).
+
 ## Unreleased (22 Oct 2026) — handoff: summon, --start/--wait, passkey, cancel
 
 1. **The window comes to the user.** `cli/summon.ps1` shows a toast, flashes

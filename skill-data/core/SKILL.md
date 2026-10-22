@@ -463,6 +463,10 @@ agent-hands fill "#email" "you@example.com"   # replaces existing text
 agent-hands fill --ref @e63 "text"            # with --ref, text is the first arg
 agent-hands fill "#note" " more" --append     # keep old text, append at the end
 agent-hands type "into whatever has focus"
+agent-hands fill "#body" --from draft.md       # the text from a file; over 300 chars it is pasted
+agent-hands fill "#key" --from env:API_KEY     # a secret stays out of the command line
+agent-hands fill "#bio" "short" --paste        # paste even a short text; --keys types even a long one
+agent-hands hurry                              # a type/fill already running pastes the rest
 agent-hands press Enter                    # Tab Escape Backspace Delete Home End Arrow*
 agent-hands press r                        # any single character; Ctrl+z, Shift+Enter
 agent-hands drag --xy 300 300 --to-xy 500 420   # press, travel held, release: shapes, sliders, cell ranges
@@ -472,6 +476,14 @@ agent-hands where                          # last cursor position
 agent-hands handoff <url> --start          # no credentials: the user signs in; then handoff --wait
 agent-hands doctor                         # is the session reachable?
 ```
+
+Text goes in as a person puts it in. A short text is typed key by key. A text
+over 300 characters is pasted. In a rich editor (`contenteditable`) the paste
+is a real Ctrl+V: the user's clipboard is borrowed and given back. Everywhere
+else the text is inserted with no clipboard. A `--from env:` value never goes
+on the clipboard. Typing speed stops at `--speed 3`, the top of human typing.
+A long typing run prints its time estimate; run `agent-hands hurry` from
+another shell to paste the rest at once.
 
 Flags: `--session <name>`, `--speed 1.6` brisk / `0.7` slow, `--json`
 machine-readable, `--quiet` exit code only.

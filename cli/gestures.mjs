@@ -110,9 +110,21 @@ export async function selectAll(cdp) {
   await sleep(lognormal(90, 0.35, 250));
 }
 
-export async function typeText(cdp, text, speed) {
+// control: { order(n), end() } from hurry.mjs. An order can raise the speed
+// or hand the rest of the text to Input.insertText, as a person who gives up
+// typing and pastes.
+export async function typeText(cdp, text, speed, control = null) {
   const t0 = Date.now();
-  for (const ch of text) {
+  const chars = [...text];
+  for (let n = 0; n < chars.length; n++) {
+    const o = control?.order(n);
+    if (o?.speed > 0) speed = o.speed;
+    if (o?.paste) {
+      await sleep(lognormal(260, 0.4, 700) / speed);
+      await cdp.send('Input.insertText', { text: chars.slice(n).join('') });
+      return { chars: chars.length, ms: Date.now() - t0, typed: n, pasted: chars.length - n };
+    }
+    const ch = chars[n];
     // Insertion happens on `char`. keyDown must not carry text or every
     // character lands twice.
     cdp.fire('Input.dispatchKeyEvent', { type: 'keyDown', key: ch });
