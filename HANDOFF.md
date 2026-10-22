@@ -284,23 +284,30 @@ ancestor that holds more than its own text (a Delete button's row), plus
 data-testid, name, href, icon path and img src. The walk computes it in the
 page, with no call to the browser.
 
-- Click: an id-less ref picks the one shown twin with its name and context.
-  Two twins with the same context still refuse.
+- Click: an id-less twin resolves only to the one shown element with its
+  tag, name and context. Two twins with one context refuse, and so does a
+  lone survivor with another context (review: removing row B left row A's
+  Delete as the only match).
 - Non-keyed lists reuse nodes, so a node id can follow the wrong content.
-  A live node whose context changed counts as moved when exactly one other
-  twin has the old context. It counts as another ref's row when its new
-  context belongs to another ref, and the click refuses. Otherwise only
-  its text changed, and the node is used.
-- Numbers: a third pass matches tag, name and context, under the same
-  moved/reused rule. A ref that loses its id after a scroll keeps its number.
+  A twin node whose context changed is not trusted: the search goes to the
+  one twin with the old context, or the click refuses. A row whose text
+  changes in place (a counter, a timestamp) therefore refuses; re-snapshot.
+- Numbers: a node match needs the same context. A third pass matches tag,
+  name and context, so a ref that loses its id after a scroll, or whose
+  content moved to another node, keeps its number.
 - Cost: `textContent` on the article body took 2.6 s for 300 Wikipedia
   links. A TreeWalker that stops at 2000 characters takes 42 ms for all 300.
   Only twins and unnamed refs are hashed (about a quarter).
+- Found on the way: the name function searched the document for
+  `label[for=id]` once per element with an id. 2142 Wikipedia links cost
+  365 ms per name count, and one FIND took 230 ms (shipped in 0.20.2, which
+  counts names on every click). `el.labels` gives the same answer for
+  labelable elements: 18 ms, and one FIND now takes 35-90 ms.
 - Tested live on 120 non-keyed rows (80 with ids): an insert at the top, a
-  rename, and both at once. Every click hit the intended row or refused, and
-  the numbers followed the content. The twin page and the scroll cases pass.
-- Limit: a row whose text changes AND moves between two snapshots gets a
-  new number, and its old ref refuses.
+  rename, both at once, and a rebuild with new nodes that drops a row. Every
+  click hit the intended row or refused, and the numbers followed the
+  content. The twin page and the scroll cases pass. Snapshot CLI median on
+  Wikipedia: 1.10 s for 0.20.2, 1.02 s now.
 - Test browsers: Edge signs a fresh profile in with the Windows account and
   syncs its extensions. Launch with `--disable-sync --disable-extensions`.
 

@@ -43,10 +43,9 @@ const NAME_OF = `(el, field) => {
       const parts = lb.split(/\\s+/).map(id => document.getElementById(id)).filter(Boolean);
       if (parts.length) return t(parts.map(p => p.innerText).join(' '));
     }
-    if (el.id) {
-      const lab = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-      if (lab) return t(lab.innerText);
-    }
+    // el.labels: a label[for] names only a labelable element. A document
+    // search per element with an id took 365 ms over 2142 Wikipedia links.
+    if (el.labels && el.labels.length) return t(el.labels[0].innerText);
     const wrap = el.closest && el.closest('label');
     if (wrap && wrap !== el) return t(wrap.innerText);
     if (field) return t(el.title || el.placeholder || el.getAttribute('name') || '');
@@ -260,19 +259,14 @@ function number(nodes, prev, targetId) {
   // a node for other content ("Edit" becoming "Save"). The name must match too.
   const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e) + shapeOf(e), r]));
   // A node-id match must win over a shape match lower down.
-  // A node whose old content now sits in exactly one other twin was reused by
-  // a non-keyed list: the number goes with the content (see CHECKED).
+  // A twin node with another context may be a non-keyed list's reused node:
+  // the number goes with the context instead (see CHECKED).
   const taken = new Set();
-  const freshTwins = uniqueShapes(nodes.map((n, i) => [i, n]), twinOf);
-  const oldTwins = uniqueShapes(old, twinOf);
-  const ids = nodes.map((n, i) => {
+  const ids = nodes.map(n => {
     const r = n.node && byNode.get(nodeKey(n) + shapeOf(n));
     if (!r || taken.has(r)) return null;
     const was = prev.refs[r];
-    if (was.ctx && n.ctx && was.ctx !== n.ctx) {
-      const to = freshTwins.get(twinOf(was)), from = oldTwins.get(twinOf(n));
-      if ((typeof to === 'number' && to !== i) || (from && from !== r)) return null;
-    }
+    if (was.ctx && n.ctx && was.ctx !== n.ctx) return null;
     taken.add(r);
     return r;
   });
@@ -406,15 +400,13 @@ const FIND = (e, { positional = !e.node } = {}) => `(() => {
     return n;
   };
   const ok = el => el && el.tagName && el.tagName.toLowerCase() === tag
-    && (ident === null || identOf(el) === ident);
+    && (ident === null || identOf(el) === ident) && (ctx === null || ctxOf(el) === ctx);
   const shown = el => el.getClientRects().length > 0;
   const named = ident || ctx !== null ? [...document.querySelectorAll(tag)].filter(x => shown(x) && ok(x)) : [];
-  const twins = named.length > 1 && ctx !== null ? named.filter(x => ctxOf(x) === ctx) : named;
-  const pick = twins.length === 1 ? twins[0] : null;
-  if (${!e.node} && named.length > 1) return pick;
+  if (${!e.node} && named.length > 1) return null;
   let el = ${positional} ? walk(${JSON.stringify(e.path)}) : null;
   if (${positional} && !ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
-  if (!ok(el) && (ident || ctx !== null)) el = pick;
+  if (!ok(el) && (ident || ctx !== null)) el = named.length === 1 ? named[0] : null;
   return ok(el) ? el : null;
 })()`;
 
@@ -443,21 +435,11 @@ const CHECKED = e => `function () {
   if (this.tagName.toLowerCase() !== ${JSON.stringify(e.tag)}) return '${CHANGED}';
   if (ident !== null && identOf(this) !== ident) return '${CHANGED}';
   // A non-keyed list reuses its nodes: after an insert, this node shows the
-  // row above's content, and the held row sits one node down. When exactly
-  // one other twin has the old context, the content moved there, and null
-  // sends the search to it. When this node now shows another ref's context,
-  // it is that ref's row, and null refuses. Otherwise only the text changed.
+  // row above's content, and the held row sits one node down. A twin whose
+  // context changed is no proof of anything, so null sends the search to the
+  // one twin with the old context, or refuses.
   const ctx = ${JSON.stringify(e.ctx ?? null)};
-  if (ctx !== null) {
-    const ctxOf = ${CTX_OF};
-    const now = ctxOf(this);
-    if (now !== ctx) {
-      if (${JSON.stringify(e.others ?? [])}.includes(now)) return null;
-      const moved = [...document.querySelectorAll(this.tagName)].filter(x => x !== this && x.getClientRects().length
-        && (ident === null || identOf(x) === ident) && ctxOf(x) === ctx);
-      if (moved.length === 1) return null;
-    }
-  }
+  if (ctx !== null && (${CTX_OF})(this) !== ctx) return null;
   return (${MEASURE}).call(this);
 }`;
 
@@ -474,14 +456,6 @@ const MEASURE = `function () {
                           coveredBy: covered ? label(top) : null });
 }`;
 
-// The contexts of the ref's twins: refs with its tag and name in its document.
-function othersOf(snap, id) {
-  const me = snap.refs[id];
-  if (!me.ctx) return [];
-  return Object.entries(snap.refs).filter(([r, x]) => r !== id && x.ctx && shapeOf(x) === shapeOf(me))
-    .map(([, x]) => x.ctx);
-}
-
 export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   const snap = load(key);
   const id = String(ref).replace(/^@/, '');
@@ -491,7 +465,7 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   if ((cdp.targetId ?? null) !== (snap.targetId ?? null)) {
     throw usage(`those refs came from a different tab. Re-run: agent-hands snapshot${flagFor(cdp)}`);
   }
-  const e = snap.refs[id] && { ...snap.refs[id], others: othersOf(snap, id) };
+  const e = snap.refs[id];
   if (!e) {
     const n = Object.keys(snap.refs).length;
     throw usage(`unknown ref "@${id}": it is not in the last snapshot (${n} refs). ` +
