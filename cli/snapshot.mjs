@@ -227,7 +227,11 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
     throw usage(`those refs came from a different tab. Re-run: agent-hands snapshot${flagFor(cdp)}`);
   }
   const e = snap.refs[id];
-  if (!e) throw usage(`unknown ref "@${id}". Run: agent-hands snapshot${flagFor(cdp)}`);
+  if (!e) {
+    const n = Object.keys(snap.refs).length;
+    throw usage(`unknown ref "@${id}". The last snapshot has ${n ? `@e1 to @e${n}` : 'no refs'}.\n` +
+      `  Read it again: agent-hands snapshot${flagFor(cdp)}`);
+  }
 
   let box = await read(cdp, e);
   if (!box) throw usage(`@${id} ("${e.name || e.tag}") is no longer on the page. Re-snapshot.`);
@@ -247,5 +251,11 @@ async function read(cdp, e) {
   return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
 }
 
-const flagFor = cdp => (cdp.external ? ' --browser <name>' : '');
+// The flag that reaches this same browser again. The store key carries the
+// browser name; a raw --cdp connection has none, so its port is named instead.
+const flagFor = cdp => {
+  if (!cdp.external) return '';
+  const name = String(cdp.key || '').replace(/-[0-9a-f]{8}$/, '');
+  return name && name !== 'cdp' && name !== 'dir' ? ` --browser ${name}` : ` --cdp ${cdp.port}`;
+};
 const usage = m => Object.assign(new Error(m), { code: 'EUSAGE' });

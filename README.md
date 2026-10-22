@@ -5,7 +5,8 @@ are logged into, or an `agent-browser` session. It clicks, types and scrolls at
 human rates. One CDP socket, a whole gesture dispatched at 60-100Hz, Fitts-law
 motion with Bezier paths and lognormal keystroke timing.
 
-It never moves your physical cursor and never raises the window.
+It never moves your physical cursor. It brings the window up only when it hands
+you a sign-in, and only once you stop typing.
 
 ![agent-hands driving a throwaway Edge: snapshot, fill at human rate, press Enter, click the result](docs/assets/hero.gif)
 
@@ -15,7 +16,7 @@ every claim here, and the way to reproduce them, are in
 
 ```bash
 agent-hands snapshot                         # find the element, get @e1 @e2
-agent-hands fill "#searchbox_input" "auto ecole vincennes"
+agent-hands fill --ref @e2 "auto ecole vincennes"
 agent-hands press Enter
 agent-hands text h1                          # verify
 ```
@@ -50,7 +51,8 @@ browser you did not launch are not in its scope.
 - One CDP socket. It sends input events and reads the DOM. Nothing else.
 - Credentials never appear in argv or in output. They arrive through
   `--email-env`, `--password-env` or stdin, and are typed, not logged.
-- The physical cursor never moves. The window is never raised.
+- The physical cursor never moves. The window comes up only for a sign-in
+  handoff, after 3 s with no keystroke, so your typing never lands in it.
 - On your own browser it holds one approved connection in a relay and writes
   an audit line per command. `agent-hands audit` prints them.
 - It refuses when a click would be wrong: a covered target, a form container
@@ -94,7 +96,7 @@ First run with nothing else installed:
 ```bash
 agent-hands launch https://example.com     # starts a browser with the right flags, prints its port
 agent-hands snapshot --cdp <port>          # see the page, get @e1 @e2
-agent-hands click --ref @e3 --cdp <port>   # act on what you saw
+agent-hands click --ref @e1 --cdp <port>   # act on what you saw: "Learn more"
 ```
 
 ## Commands
@@ -116,7 +118,10 @@ Flags: `--session <name>` (default `work`), `--browser <name>`,
 `--user-data-dir <path>`, `--cdp <port|url>`, `--tab <match>`, `--no-activate`,
 `--speed 1.6` brisk / `0.7` slow, `--json`, `--quiet`.
 
-Exit codes: `0` dispatched, `1` runtime failure, `2` usage error.
+Exit codes: `0` dispatched, `1` runtime failure, `2` usage error, `3` challenge
+still there, `4` sign-in page while flagged, `5` several browsers live (ask the
+user), `6` dead pin, `7` wait timed out, `8` target covered, `9` the user closed
+the sign-in tab.
 
 ## Your own browser
 
