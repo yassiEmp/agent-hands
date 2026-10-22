@@ -274,9 +274,35 @@ Review fixes before 0.20.2:
 - `scrollBy` releases its object group in a `finally`. When the held
   scroller is gone (navigation) or detached (re-render), the final position
   comes from a fresh search.
-- Still open: on a page with more than 80 duplicate or unnamed refs, a
-  scroll changes which of them get an id. A ref that loses its id gets a
-  new number at the next snapshot.
+
+## Unreleased (22 Oct 2026) — context key for twins past the id cap
+
+A twin past ID_CAP had no node id, so a click fell back to position and
+name, and refused when the name was shared. Each twin and each unnamed ref now
+carries `ctx`: a hash of the first 2000 characters of text of its nearest
+ancestor that holds more than its own text (a Delete button's row), plus
+data-testid, name, href, icon path and img src. The walk computes it in the
+page, with no call to the browser.
+
+- Click: an id-less ref picks the one shown twin with its name and context.
+  Two twins with the same context still refuse.
+- Non-keyed lists reuse nodes, so a node id can follow the wrong content.
+  A live node whose context changed counts as moved when exactly one other
+  twin has the old context. It counts as another ref's row when its new
+  context belongs to another ref, and the click refuses. Otherwise only
+  its text changed, and the node is used.
+- Numbers: a third pass matches tag, name and context, under the same
+  moved/reused rule. A ref that loses its id after a scroll keeps its number.
+- Cost: `textContent` on the article body took 2.6 s for 300 Wikipedia
+  links. A TreeWalker that stops at 2000 characters takes 42 ms for all 300.
+  Only twins and unnamed refs are hashed (about a quarter).
+- Tested live on 120 non-keyed rows (80 with ids): an insert at the top, a
+  rename, and both at once. Every click hit the intended row or refused, and
+  the numbers followed the content. The twin page and the scroll cases pass.
+- Limit: a row whose text changes AND moves between two snapshots gets a
+  new number, and its old ref refuses.
+- Test browsers: Edge signs a fresh profile in with the Windows account and
+  syncs its extensions. Launch with `--disable-sync --disable-extensions`.
 
 ## Unreleased (22 Oct 2026) — stable refs: node ids and numbers that survive
 

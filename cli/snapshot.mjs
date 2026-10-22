@@ -56,6 +56,37 @@ const NAME_OF = `(el, field) => {
 // The identity a ref is checked against at click time.
 const IDENT_OF = `el => nameOf(el, el.matches('input,textarea,select') || el.isContentEditable)`;
 
+// Where an element sits, by content: a hash of the text of the nearest
+// ancestor that holds more than the element's own text (for a Delete button,
+// its row), and of the attributes that tell icons apart. It tells twins apart
+// with no call to the browser, and it follows the content when a non-keyed
+// list moves rows between positions. Null when there is nothing to hash.
+const CTX_OF = `el => {
+  // The first 2000 characters only. textContent of an article body for each of
+  // 300 Wikipedia links took 2.6 s.
+  const textOf = n => {
+    const w = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    let s = '';
+    while (s.length < 2000 && w.nextNode()) s += w.currentNode.data;
+    return s.slice(0, 2000).replace(/\\s+/g, ' ').trim();
+  };
+  const own = textOf(el);
+  let text = '';
+  for (let n = el.parentElement, i = 0; n && n !== document.body && i < 6; n = n.parentElement, i++) {
+    const t = textOf(n);
+    if (t !== own) { text = t; break; }
+  }
+  const q = s => el.querySelector(s);
+  const sig = [el.getAttribute('data-testid'), el.getAttribute('name'), el.getAttribute('href'),
+    q('svg use') && q('svg use').getAttribute('href'), q('svg path') && (q('svg path').getAttribute('d') || '').slice(0, 80),
+    q('img') && q('img').getAttribute('src')].map(v => v || '').join('|');
+  if (!text && !sig.replace(/\\|/g, '')) return null;
+  const s = text + '#' + sig;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}`;
+
 const WALK = (interactive, structural, max) => `(() => {
   const INTERACTIVE = ${JSON.stringify(interactive)};
   const STRUCTURAL = ${JSON.stringify(structural)};
@@ -64,6 +95,7 @@ const WALK = (interactive, structural, max) => `(() => {
 
   const nameOf = ${NAME_OF};
   const identOf = ${IDENT_OF};
+  const ctxOf = ${CTX_OF};
 
   const pathOf = el => {
     const p = [];
@@ -131,6 +163,11 @@ const WALK = (interactive, structural, max) => `(() => {
       path: pathOf(el), sel: selOf(el), ident: identOf(el),
     });
   }
+  // A context only where the name does not tell the element apart: 42 ms for
+  // all 300 Wikipedia refs, and a unique name never reads it.
+  const count = new Map();
+  for (const o of out) count.set(o.tag + '|' + o.ident, (count.get(o.tag + '|' + o.ident) || 0) + 1);
+  out.forEach((o, i) => { o.ctx = !o.ident || count.get(o.tag + '|' + o.ident) > 1 ? ctxOf(ordered[i]) : null; });
   const json = JSON.stringify({
     url: location.origin + location.pathname, title: document.title,
     vw, vh, sx: scrollX, sy: scrollY,
@@ -185,8 +222,9 @@ export async function capture(cdp, { max = 300 } = {}) {
 // Numbers survive a new snapshot of the same tab, so @e12 still names the
 // Create button after a click opens a section above it. An element keeps its
 // number when it has the same node id, else when its tag and name are unique
-// on both snapshots. A number is never given to another element in the same
-// tab, even after a navigation, so an old ref names its element or nothing.
+// on both snapshots, else when its tag, name and context (CTX_OF) are. A
+// number is never given to another element in the same tab, even after a
+// navigation, so an old ref names its element or nothing.
 // Only a new tab starts again at @e1.
 //
 // Position is no evidence. A list of "Delete" buttons re-rendered after a row
@@ -194,12 +232,16 @@ export async function capture(cdp, { max = 300 } = {}) {
 const shapeOf = e => JSON.stringify([e.frame?.targetId ?? '', e.tag, e.ident ?? e.name ?? '']);
 const nodeKey = e => (e.frame?.targetId ?? '') + ':' + e.node;
 
-// Shapes that occur once in `list`, mapped to their ref (or index).
-function uniqueShapes(list) {
+// A twin's shape: the name is shared, so the context tells it apart.
+const twinOf = e => e.ctx ? shapeOf(e) + e.ctx : null;
+const named = e => (e.ident ?? e.name) ? shapeOf(e) : null;
+
+// Keys that occur once in `list`, mapped to their ref (or index).
+function uniqueShapes(list, keyOf = named) {
   const seen = new Map();
   for (const [r, e] of list) {
-    if (!(e.ident ?? e.name)) continue;
-    const s = shapeOf(e);
+    const s = keyOf(e);
+    if (s === null) continue;
     seen.set(s, seen.has(s) ? null : r);
   }
   return seen;
@@ -217,20 +259,36 @@ function number(nodes, prev, targetId) {
   // new document in another process can reuse one, and a framework can reuse
   // a node for other content ("Edit" becoming "Save"). The name must match too.
   const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e) + shapeOf(e), r]));
-  // Two passes: a node-id match must win over a shape match lower down.
-  const shapes = uniqueShapes(old);
-  const fresh = uniqueShapes(nodes.map((n, i) => [i, n]));
+  // A node-id match must win over a shape match lower down.
+  // A node whose old content now sits in exactly one other twin was reused by
+  // a non-keyed list: the number goes with the content (see CHECKED).
   const taken = new Set();
-  const ids = nodes.map(n => {
+  const freshTwins = uniqueShapes(nodes.map((n, i) => [i, n]), twinOf);
+  const oldTwins = uniqueShapes(old, twinOf);
+  const ids = nodes.map((n, i) => {
     const r = n.node && byNode.get(nodeKey(n) + shapeOf(n));
-    if (r && !taken.has(r)) { taken.add(r); return r; }
-    return null;
+    if (!r || taken.has(r)) return null;
+    const was = prev.refs[r];
+    if (was.ctx && n.ctx && was.ctx !== n.ctx) {
+      const to = freshTwins.get(twinOf(was)), from = oldTwins.get(twinOf(n));
+      if ((typeof to === 'number' && to !== i) || (from && from !== r)) return null;
+    }
+    taken.add(r);
+    return r;
   });
-  nodes.forEach((n, i) => {
-    if (ids[i] || fresh.get(shapeOf(n)) !== i) return;
-    const r = shapes.get(shapeOf(n));
-    if (r && !taken.has(r)) { taken.add(r); ids[i] = r; }
-  });
+  // Then the unique name, then the unique name and context. The last pass
+  // keeps a twin's number when it has no node id: past ID_CAP, or after a
+  // scroll moved it below the cap.
+  for (const keyOf of [named, twinOf]) {
+    const shapes = uniqueShapes(old, keyOf);
+    const fresh = uniqueShapes(nodes.map((n, i) => [i, n]), keyOf);
+    nodes.forEach((n, i) => {
+      const k = keyOf(n);
+      if (ids[i] || k === null || fresh.get(k) !== i) return;
+      const r = shapes.get(k);
+      if (r && !taken.has(r)) { taken.add(r); ids[i] = r; }
+    });
+  }
   // `next` outlives the refs that used it: a number from two snapshots ago
   // must not come back.
   let next = Math.max(prev.next || 0, ...old.map(([r]) => (Number(r.slice(1)) || 0) + 1));
@@ -323,18 +381,22 @@ export function render(snap) {
 //
 // A ref with a node id reaches here only when that node is gone. Its old
 // position then holds a lookalike at best: a non-keyed list re-render put
-// row 4's Delete at row 3's path. So only a unique name is accepted.
+// row 4's Delete at row 3's path. So only a unique name, or a unique name and
+// context, is accepted.
 // `positional` keeps the position steps for choosing what to scroll, where a
 // lookalike in the same container is harmless.
 //
-// A ref with no node id had a unique name in its snapshot. When a second
-// shown element now has that name, its position may hold the new one, so the
-// ref is refused. Review of f473aff: a re-render added a Delete above the
-// held Delete, and the path led to the new button.
+// A ref with no node id had a unique name in its snapshot, or was a twin past
+// ID_CAP. When more than one shown element has the name, its position may hold
+// another, so only the one twin with the same context (CTX_OF) is accepted.
+// Review of f473aff: a re-render added a Delete above the held Delete, and the
+// path led to the new button.
 const FIND = (e, { positional = !e.node } = {}) => `(() => {
   const nameOf = ${NAME_OF};
   const identOf = ${IDENT_OF};
+  const ctxOf = ${CTX_OF};
   const tag = ${JSON.stringify(e.tag)}, ident = ${JSON.stringify(e.ident ?? null)};
+  const ctx = ${JSON.stringify(e.ctx ?? null)};
   const walk = path => {
     let n = document.documentElement;
     for (const i of path) {
@@ -346,11 +408,13 @@ const FIND = (e, { positional = !e.node } = {}) => `(() => {
   const ok = el => el && el.tagName && el.tagName.toLowerCase() === tag
     && (ident === null || identOf(el) === ident);
   const shown = el => el.getClientRects().length > 0;
-  const named = ident ? [...document.querySelectorAll(tag)].filter(x => shown(x) && ok(x)) : [];
-  if (${!e.node} && named.length > 1) return null;
+  const named = ident || ctx !== null ? [...document.querySelectorAll(tag)].filter(x => shown(x) && ok(x)) : [];
+  const twins = named.length > 1 && ctx !== null ? named.filter(x => ctxOf(x) === ctx) : named;
+  const pick = twins.length === 1 ? twins[0] : null;
+  if (${!e.node} && named.length > 1) return pick;
   let el = ${positional} ? walk(${JSON.stringify(e.path)}) : null;
   if (${positional} && !ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
-  if (!ok(el) && ident) el = named.length === 1 ? named[0] : null;
+  if (!ok(el) && (ident || ctx !== null)) el = pick;
   return ok(el) ? el : null;
 })()`;
 
@@ -378,6 +442,22 @@ const CHECKED = e => `function () {
   if (!this.isConnected) return null;
   if (this.tagName.toLowerCase() !== ${JSON.stringify(e.tag)}) return '${CHANGED}';
   if (ident !== null && identOf(this) !== ident) return '${CHANGED}';
+  // A non-keyed list reuses its nodes: after an insert, this node shows the
+  // row above's content, and the held row sits one node down. When exactly
+  // one other twin has the old context, the content moved there, and null
+  // sends the search to it. When this node now shows another ref's context,
+  // it is that ref's row, and null refuses. Otherwise only the text changed.
+  const ctx = ${JSON.stringify(e.ctx ?? null)};
+  if (ctx !== null) {
+    const ctxOf = ${CTX_OF};
+    const now = ctxOf(this);
+    if (now !== ctx) {
+      if (${JSON.stringify(e.others ?? [])}.includes(now)) return null;
+      const moved = [...document.querySelectorAll(this.tagName)].filter(x => x !== this && x.getClientRects().length
+        && (ident === null || identOf(x) === ident) && ctxOf(x) === ctx);
+      if (moved.length === 1) return null;
+    }
+  }
   return (${MEASURE}).call(this);
 }`;
 
@@ -394,6 +474,14 @@ const MEASURE = `function () {
                           coveredBy: covered ? label(top) : null });
 }`;
 
+// The contexts of the ref's twins: refs with its tag and name in its document.
+function othersOf(snap, id) {
+  const me = snap.refs[id];
+  if (!me.ctx) return [];
+  return Object.entries(snap.refs).filter(([r, x]) => r !== id && x.ctx && shapeOf(x) === shapeOf(me))
+    .map(([, x]) => x.ctx);
+}
+
 export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   const snap = load(key);
   const id = String(ref).replace(/^@/, '');
@@ -403,7 +491,7 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   if ((cdp.targetId ?? null) !== (snap.targetId ?? null)) {
     throw usage(`those refs came from a different tab. Re-run: agent-hands snapshot${flagFor(cdp)}`);
   }
-  const e = snap.refs[id];
+  const e = snap.refs[id] && { ...snap.refs[id], others: othersOf(snap, id) };
   if (!e) {
     const n = Object.keys(snap.refs).length;
     throw usage(`unknown ref "@${id}": it is not in the last snapshot (${n} refs). ` +
@@ -514,7 +602,9 @@ async function nearOf(cdp, e, session) {
   for (const expr of [FIND(e, { positional: true }), FIND(e)]) {
     if (await callOnNode(cdp, e.node, `function () { return this === ${expr}; }`, session) === true) return expr;
   }
-  return 'null';
+  // The node is gone or its content moved: the search by name and context is
+  // the one measure() used.
+  return FIND(e);
 }
 
 // The point as frame `f` sees it: f's box is its window.
