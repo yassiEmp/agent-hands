@@ -134,7 +134,7 @@ Flags: `--session <name>` (default `work`), `--browser <name>`,
 
 Exit codes: `0` dispatched, `1` runtime failure, `2` usage error, `3` challenge
 still there, `4` sign-in page while flagged, `5` several browsers live (ask the
-user), `6` dead pin, `7` wait timed out, `8` target covered, `9` the user closed
+user), `6` dead pin, `7` wait timed out, `8` target covered or out of view, `9` the user closed
 the sign-in tab.
 
 ## Your own browser

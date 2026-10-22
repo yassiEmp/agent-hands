@@ -266,9 +266,13 @@ and removed, node re-rendered, full form re-rendered, row removed from a
 non-keyed list (held ref refuses), live node renamed (refuses), field filled
 twice, frame moved, reload.
 
-Separate bug found while testing, not fixed: a ref inside a frame whose own
-content scrolls stays offscreen. agent-hands scrolls only the outer page,
-then clicks outside the viewport and reports success with 0 points.
+Found while testing, fixed in the same release: a ref inside a frame whose
+own content scrolls stayed offscreen. agent-hands scrolled only the outer
+page, then pressed outside the window and reported success. The frame's
+document now scrolls first, in the frame's session. Any ref still out of
+view after scrolling is refused with exit 8 (an element at top:-300px was
+"clicked" at y=-289 before). Not handled: a middle frame between the page
+and a nested frame that scrolls its own content.
 
 ## Unreleased (22 Oct 2026) — a ref clicked the wrong button after the page changed
 

@@ -3,7 +3,7 @@
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved,
 // 4 sign-in page while flagged, 5 several browsers live (ask the user), 6 dead pin,
-// 7 wait timed out, 8 target covered, 9 the user closed the sign-in tab.
+// 7 wait timed out, 8 target covered or out of view, 9 the user closed the sign-in tab.
 
 import '../cli/require-node.mjs';   // exits on Node < 22 before anything below can throw
 import { readFileSync, createReadStream } from 'node:fs';

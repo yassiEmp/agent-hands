@@ -248,7 +248,8 @@ const CENTRE = 'document.elementFromPoint(innerWidth / 2, innerHeight / 2)';
 
 // near: a page expression for the element to bring into view. Without it, the
 // scroller under the middle of the viewport moves, which is what a wheel does.
-export async function scrollBy(cdp, deltaY, speed, { near = CENTRE } = {}) {
+// session: scroll inside a frame's own document instead of the page.
+export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session } = {}) {
   const t0 = Date.now();
   const dir = Math.sign(deltaY);
   const total = Math.abs(deltaY);
@@ -261,14 +262,16 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE } = {}) {
     for (let i = 1; i <= frames; i++) {
       const eased = 1 - Math.pow(1 - i / frames, 3);
       const at = notch * eased;
-      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER}(${near}).scrollBy(0,${dir * (at - prev)})` });
+      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER}(${near}).scrollBy(0,${dir * (at - prev)})` }, session);
       prev = at;
       await sleep(16);
     }
     done += notch;
     await sleep(rand(70, 260) / speed); // pause between bursts
   }
-  const y = await cdp.evaluate(`(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER}(${near}))`);
+  const { result } = await cdp.send('Runtime.evaluate', { returnByValue: true,
+    expression: `(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER}(${near}))` }, session);
+  const y = result?.value;
   return { pixels: deltaY, ms: Date.now() - t0, y };
 }
 

@@ -393,13 +393,34 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
 
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
-  if (box.y < 0 || box.y > box.vh) {
+  // A frame that scrolls its own document goes first: no page scroll brings
+  // an element below the frame's fold into view. Measured on example.com in a
+  // 600x300 frame: the page scrolled, the press landed outside the window,
+  // and the click reported success.
+  if (box.inner && outside(box.inner)) {
+    const near = FIND(e, { positional: true });
+    await withFrame(cdp, box.frame.targetId, session =>
+      scrollBy(cdp, Math.round(box.inner.y - box.inner.vh / 2), speed, { near, session }));
+    box = await read(cdp, e) || box;
+  }
+  if (outside(box)) {
     const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e, { positional: true });
     await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed, { near });
     box = await read(cdp, e) || box;
   }
+  refuseOutside(box, `@${id} ("${e.name || e.tag}")`);
   refuseCovered(box, `@${id} ("${e.name || e.tag}")`, force);
   return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag, ...(box.frame && { frame: box.frame }) };
+}
+
+const outside = b => b.y < 0 || b.y > b.vh;
+
+// A press outside the window reaches nothing, so it must not report success.
+function refuseOutside(box, what) {
+  if (!outside(box) && !(box.inner && outside(box.inner))) return;
+  throw Object.assign(new Error(`${what} is still out of view after scrolling.
+` +
+    `  A press there reaches nothing. Scroll its container, then snapshot again.`), { code: 'ECOVERED' });
 }
 
 // A nested frame's own <iframe> lives inside another frame, so the page scrolls
@@ -438,7 +459,8 @@ async function read(cdp, e) {
   const raw = await withFrame(cdp, f.targetId, sid => measure(cdp, e, sid)).catch(() => null);
   if (!raw) return null;
   const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame };
+  // `inner`: where the element sits in the frame's own window.
+  return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame, inner: { y: b.y, vh: b.vh } };
 }
 
 // The flag that reaches this same browser again. The store key carries the
