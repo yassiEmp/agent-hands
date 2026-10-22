@@ -1189,8 +1189,8 @@ function requireArgs(cmd, rest, args, hasXY) {
 
   if (NEEDS_TARGET.has(cmd) && !withRef && !args.flags.text && !args.flags.label && !rest[0]) {
     bad(cmd + ' needs a target. One of:' + NL
-      + '  ' + cmd + ' "#css-selector"      a CSS selector' + NL
-      + '  ' + cmd + ' --ref @e12           a ref from: agent-hands snapshot' + NL
+      + '  ' + cmd + ' --ref @e12           a ref from: agent-hands snapshot (use this)' + NL
+      + '  ' + cmd + ' "#css-selector"      a stable id you already know' + NL
       + '  ' + cmd + ' --text "Label"       visible text of a button or link' + NL
       + '  ' + cmd + ' --label "Email"      a form field by its label' + NL
       + '  ' + cmd + ' --xy 420 300         raw viewport coordinates');
