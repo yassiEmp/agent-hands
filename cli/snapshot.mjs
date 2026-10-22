@@ -399,8 +399,8 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   // reported success.
   const depth = e.frame?.depth ?? 0;
   if (box.inner) {
-    const near = FIND(e, { positional: true });
-    await withFrame(cdp, box.frame.targetId, session => bring(cdp, box.inner, near, session, speed, { exact: true }));
+    await withFrame(cdp, box.frame.targetId, async session =>
+      bring(cdp, box.inner, await nearOf(cdp, e, session), session, speed, { exact: true }));
     box = await read(cdp, e) || box;
   }
   // The frames between the page and the ref's frame, innermost first. Each
@@ -415,7 +415,7 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
     }
   }
   if (!box.frame || outside(box)) {
-    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e, { positional: true });
+    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : await nearOf(cdp, e, undefined);
     await bring(cdp, box, near, undefined, speed, { exact: !box.frame });
     box = await read(cdp, e) || box;
   }
@@ -432,19 +432,23 @@ const offAxis = (v, axis) => axis === 'x'
   : v.vh > 0 && (v.y < 0 || v.y > v.vh);
 const outside = v => offAxis(v, 'x') || offAxis(v, 'y');
 
-// How far `el` sits from the middle of what the scroller of `level` shows,
-// clipped to the window. Zero when it is already inside. A carousel 500 px
-// wide shows less than the window, so centring on the window left a button
-// past the carousel's edge.
+// How far `el` sits from the middle of the box of the scroller of `level`
+// (the window for the last level). Zero when it is already inside. A carousel
+// 500 px wide shows less than the window, so centring on the window left a
+// button past the carousel's edge. The box is not clipped to the window: a
+// list below the fold must not scroll; the window's own step brings it up.
+// A fixed element moves with no scroller, so it never asks for a scroll.
 const OFFSET = (el, level, axis) => `((el, s) => {
   if (!el) return null;
+  for (let n = el; n && n !== s && n.nodeType === 1; n = n.parentElement) {
+    if (getComputedStyle(n).position === 'fixed') return { d: 0, win: true };
+  }
   const x = ${axis === 'x'};
   const e = el.getBoundingClientRect();
-  const win = x ? innerWidth : innerHeight;
-  let lo = 0, hi = win;
+  let lo = 0, hi = x ? innerWidth : innerHeight;
   if (s !== window) {
     const r = s.getBoundingClientRect();
-    lo = Math.max(0, x ? r.left : r.top); hi = Math.min(win, x ? r.right : r.bottom);
+    lo = x ? r.left : r.top; hi = x ? r.right : r.bottom;
   }
   const mid = x ? e.left + e.width / 2 : e.top + e.height / 2;
   return { d: mid >= lo && mid <= hi ? 0 : Math.round(mid - (lo + hi) / 2), win: s === window };
@@ -477,6 +481,17 @@ async function bring(cdp, view, near, session, speed, { exact = false } = {}) {
     const d = axis === 'x' ? view.x - view.vw / 2 : view.y - view.vh / 2;
     await scrollBy(cdp, Math.round(d), speed, { near, session, axis });
   }
+}
+
+// The page expression to scroll toward. It must name the element the node id
+// found: a position can hold a lookalike, and scrolling toward it on every
+// click would move the real target out of view. 'null' falls back to the view.
+async function nearOf(cdp, e, session) {
+  if (!e.node) return FIND(e, { positional: true });
+  for (const expr of [FIND(e, { positional: true }), FIND(e)]) {
+    if (await callOnNode(cdp, e.node, `function () { return this === ${expr}; }`, session) === true) return expr;
+  }
+  return 'null';
 }
 
 // The point as frame `f` sees it: f's box is its window.
