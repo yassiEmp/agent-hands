@@ -195,13 +195,16 @@ function number(nodes, prev, targetId) {
     nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
     return { refs, next: nodes.length + 1 };
   }
-  const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e), r]));
+  // A node id alone is no proof. Ids come from a per-process counter, so a
+  // new document in another process can reuse one, and a framework can reuse
+  // a node for other content ("Edit" becoming "Save"). The name must match too.
+  const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e) + shapeOf(e), r]));
   // Two passes: a node-id match must win over a shape match lower down.
   const shapes = uniqueShapes(old);
   const fresh = uniqueShapes(nodes.map((n, i) => [i, n]));
   const taken = new Set();
   const ids = nodes.map(n => {
-    const r = n.node && byNode.get(nodeKey(n));
+    const r = n.node && byNode.get(nodeKey(n) + shapeOf(n));
     if (r && !taken.has(r)) { taken.add(r); return r; }
     return null;
   });
@@ -374,7 +377,7 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   if (!snap) {
     throw usage(`no snapshot for this browser yet. Run: agent-hands snapshot${flagFor(cdp)}`);
   }
-  if (cdp.targetId && snap.targetId && cdp.targetId !== snap.targetId) {
+  if ((cdp.targetId ?? null) !== (snap.targetId ?? null)) {
     throw usage(`those refs came from a different tab. Re-run: agent-hands snapshot${flagFor(cdp)}`);
   }
   const e = snap.refs[id];
