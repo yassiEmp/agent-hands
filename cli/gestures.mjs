@@ -271,28 +271,33 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session, axi
         arguments: [{ value: sideways ? d : 0 }, { value: sideways ? 0 : d }] }, session)
     : cdp.fire('Runtime.evaluate', { expression: `${SCROLLER(axis)}(${near}).scrollBy(${sideways ? d : 0},${sideways ? 0 : d})` }, session);
 
-  while (done < total) {
-    const notch = Math.min(total - done, rand(90, 190));
-    const frames = Math.max(3, Math.round(notch / 22));
-    let prev = 0;
-    for (let i = 1; i <= frames; i++) {
-      const eased = 1 - Math.pow(1 - i / frames, 3);
-      const at = notch * eased;
-      step(dir * (at - prev));
-      prev = at;
-      await sleep(16);
+  try {
+    while (done < total) {
+      const notch = Math.min(total - done, rand(90, 190));
+      const frames = Math.max(3, Math.round(notch / 22));
+      let prev = 0;
+      for (let i = 1; i <= frames; i++) {
+        const eased = 1 - Math.pow(1 - i / frames, 3);
+        const at = notch * eased;
+        step(dir * (at - prev));
+        prev = at;
+        await sleep(16);
+      }
+      done += notch;
+      await sleep(rand(70, 260) / speed); // pause between bursts
     }
-    done += notch;
-    await sleep(rand(70, 260) / speed); // pause between bursts
+    const read = sideways ? 'Math.round(s === window ? scrollX : s.scrollLeft)' : 'Math.round(s === window ? scrollY : s.scrollTop)';
+    // The held scroller is gone after a navigation, and detached after a
+    // re-render. A fresh search then gives the position the page shows.
+    const last = objectId && await cdp.send('Runtime.callFunctionOn', { objectId, returnByValue: true,
+      functionDeclaration: `function () { const s = this; return s === window || s.isConnected ? ${read} : null; }` }, session)
+      .catch(() => null);
+    const y = last?.result?.value ?? (await cdp.send('Runtime.evaluate', { returnByValue: true,
+      expression: `(s => ${read})(${SCROLLER(axis)}(${near}))` }, session)).result?.value;
+    return { pixels: deltaY, ms: Date.now() - t0, y };
+  } finally {
+    if (objectId) cdp.send('Runtime.releaseObjectGroup', { objectGroup: group }, session).catch(() => {});
   }
-  const read = sideways ? 'Math.round(s === window ? scrollX : s.scrollLeft)' : 'Math.round(s === window ? scrollY : s.scrollTop)';
-  const { result } = objectId
-    ? await cdp.send('Runtime.callFunctionOn', { objectId, returnByValue: true,
-        functionDeclaration: `function () { const s = this; return ${read}; }` }, session)
-    : await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `(s => ${read})(${SCROLLER(axis)}(${near}))` }, session);
-  if (objectId) cdp.send('Runtime.releaseObjectGroup', { objectGroup: group }, session).catch(() => {});
-  const y = result?.value;
-  return { pixels: deltaY, ms: Date.now() - t0, y };
 }
 
 // ------------------------------------------------- element resolution

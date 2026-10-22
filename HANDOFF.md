@@ -263,6 +263,21 @@ Medians, old and new interleaved:
 - DOMSnapshot.captureSnapshot (one call for all ids) was measured and
   rejected: 0.85 s and 2.4 MB per call on this page.
 
+Review fixes before 0.20.2:
+- A ref with no id had a unique name. When a second shown element now has
+  that name, the click is refused (exit 2). Before the fix, a twin added
+  above the held Delete took its path and was clicked. Tested live: the
+  held ref refuses; after a new snapshot both Deletes get ids, and three
+  clicks all hit the original.
+- The uniqueness count skips hidden elements, so a `display:none` mobile
+  copy of a link no longer blocks the name search.
+- `scrollBy` releases its object group in a `finally`. When the held
+  scroller is gone (navigation) or detached (re-render), the final position
+  comes from a fresh search.
+- Still open: on a page with more than 80 duplicate or unnamed refs, a
+  scroll changes which of them get an id. A ref that loses its id gets a
+  new number at the next snapshot.
+
 ## Unreleased (22 Oct 2026) — stable refs: node ids and numbers that survive
 
 Follow-up to the name check in 0.19.2. Each ref stores the browser's

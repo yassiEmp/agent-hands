@@ -326,6 +326,11 @@ export function render(snap) {
 // row 4's Delete at row 3's path. So only a unique name is accepted.
 // `positional` keeps the position steps for choosing what to scroll, where a
 // lookalike in the same container is harmless.
+//
+// A ref with no node id had a unique name in its snapshot. When a second
+// shown element now has that name, its position may hold the new one, so the
+// ref is refused. Review of f473aff: a re-render added a Delete above the
+// held Delete, and the path led to the new button.
 const FIND = (e, { positional = !e.node } = {}) => `(() => {
   const nameOf = ${NAME_OF};
   const identOf = ${IDENT_OF};
@@ -340,12 +345,12 @@ const FIND = (e, { positional = !e.node } = {}) => `(() => {
   };
   const ok = el => el && el.tagName && el.tagName.toLowerCase() === tag
     && (ident === null || identOf(el) === ident);
+  const shown = el => el.getClientRects().length > 0;
+  const named = ident ? [...document.querySelectorAll(tag)].filter(x => shown(x) && ok(x)) : [];
+  if (${!e.node} && named.length > 1) return null;
   let el = ${positional} ? walk(${JSON.stringify(e.path)}) : null;
   if (${positional} && !ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
-  if (!ok(el) && ident) {
-    const named = [...document.querySelectorAll(tag)].filter(ok);
-    el = named.length === 1 ? named[0] : null;
-  }
+  if (!ok(el) && ident) el = named.length === 1 ? named[0] : null;
   return ok(el) ? el : null;
 })()`;
 
