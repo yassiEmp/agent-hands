@@ -369,56 +369,67 @@ PACING IS NOT YOURS TO WRITE
 
 function parseArgs(argv) {
   const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: Number(process.env.AGENT_HANDS_SPEED) || 1, json: false, quiet: false, _: [], flags: {} };
-  for (let i = 0; i < argv.length; i++) {
+  // A flag's value is the next word. A missing value used to take the next
+  // flag as its value: `click --ref --cdp 52728` lost --cdp and fell back to
+  // the user's own browser. A value that starts with `--` is refused.
+  let i = 0;
+  const val = flag => {
+    const v = argv[++i];
+    if (v === undefined || v.startsWith('--')) {
+      throw Object.assign(new Error(`${flag} needs a value${v === undefined ? '' : `, got the flag ${v}`}.`), { code: 'EUSAGE' });
+    }
+    return v;
+  };
+  for (; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--session') { out.session = argv[++i]; out.explicitSession = true; }
-    else if (a === '--browser') out.browser = argv[++i];
-    else if (a === '--cdp') out.cdp = argv[++i];
-    else if (a === '--user-data-dir') out.userDataDir = argv[++i];
-    else if (a === '--tab') out.tab = argv[++i];
+    if (a === '--session') { out.session = val(a); out.explicitSession = true; }
+    else if (a === '--browser') out.browser = val(a);
+    else if (a === '--cdp') out.cdp = val(a);
+    else if (a === '--user-data-dir') out.userDataDir = val(a);
+    else if (a === '--tab') out.tab = val(a);
     else if (a === '--no-activate') out.activate = false;
     else if (a === '--here') out.flags.here = true;
     else if (a === '--new-tab') out.flags.newTab = true;
-    else if (a === '--speed') out.speed = Number(argv[++i]) || 1;
-    else if (a === '--text') out.flags.text = argv[++i];
-    else if (a === '--label') out.flags.label = argv[++i];
+    else if (a === '--speed') out.speed = Number(val(a)) || 1;
+    else if (a === '--text') out.flags.text = val(a);
+    else if (a === '--label') out.flags.label = val(a);
     else if (a === '--gone') out.flags.gone = true;
     else if (a === '--enabled') out.flags.enabled = true;
     else if (a === '--settled') out.flags.settled = true;
-    else if (a === '--url') out.flags.url = argv[++i];
-    else if (a === '--timeout') out.flags.timeout = Math.max(0, Number(argv[++i]) || 0);
-    else if (a === '--ref') out.flags.ref = argv[++i];
-    else if (a === '--xy') { out.flags.x = Number(argv[++i]); out.flags.y = Number(argv[++i]); }
-    else if (a === '--to') out.flags.to = argv[++i];
-    else if (a === '--to-xy') { out.flags.toX = Number(argv[++i]); out.flags.toY = Number(argv[++i]); }
+    else if (a === '--url') out.flags.url = val(a);
+    else if (a === '--timeout') out.flags.timeout = Math.max(0, Number(val(a)) || 0);
+    else if (a === '--ref') out.flags.ref = val(a);
+    else if (a === '--xy') { out.flags.x = Number(val(a)); out.flags.y = Number(val(a)); }
+    else if (a === '--to') out.flags.to = val(a);
+    else if (a === '--to-xy') { out.flags.toX = Number(val(a)); out.flags.toY = Number(val(a)); }
     else if (a === '--json') out.json = true;
     else if (a === '--quiet') out.quiet = true;
     else if (a === '--full') out.flags.full = true;
-    else if (a === '--times') out.flags.times = Math.max(1, Number(argv[++i]) || 1);
-    else if (a === '--max') out.flags.max = Math.max(1, Number(argv[++i]) || 300);
+    else if (a === '--times') out.flags.times = Math.max(1, Number(val(a)) || 1);
+    else if (a === '--max') out.flags.max = Math.max(1, Number(val(a)) || 300);
     else if (a === '--append') out.flags.append = true;
     else if (a === '--yes' || a === '-y') out.flags.yes = true;
     else if (a === '--no-update-check') out.flags.noUpdateCheck = true;
     else if (a === '--pause-on-challenge') out.flags.pauseOnChallenge = true;
-    else if (a === '--gap') out.flags.gap = Math.max(0, Number(argv[++i]) || 0);
-    else if (a === '--file') out.flags.file = argv[++i];
+    else if (a === '--gap') out.flags.gap = Math.max(0, Number(val(a)) || 0);
+    else if (a === '--file') out.flags.file = val(a);
     else if (a === '--stop-on-error') out.flags.stopOnError = true;
-    else if (a === '--email') out.flags.email = argv[++i];
-    else if (a === '--email-env') out.flags.emailEnv = argv[++i];
-    else if (a === '--password') out.flags.password = argv[++i];
-    else if (a === '--password-env') out.flags.passwordEnv = argv[++i];
+    else if (a === '--email') out.flags.email = val(a);
+    else if (a === '--email-env') out.flags.emailEnv = val(a);
+    else if (a === '--password') out.flags.password = val(a);
+    else if (a === '--password-env') out.flags.passwordEnv = val(a);
     else if (a === '--password-stdin') out.flags.passwordStdin = true;
-    else if (a === '--window') out.flags.window = argv[++i];
-    else if (a === '--profile') out.flags.profile = argv[++i];
-    else if (a === '--exe') out.flags.exe = argv[++i];
-    else if (a === '--port') out.flags.port = Number(argv[++i]) || 0;
+    else if (a === '--window') out.flags.window = val(a);
+    else if (a === '--profile') out.flags.profile = val(a);
+    else if (a === '--exe') out.flags.exe = val(a);
+    else if (a === '--port') out.flags.port = Number(val(a)) || 0;
     else if (a === '--no-remember') out.flags.noRemember = true;
     else if (a === '--dry-run') out.flags.dryRun = true;
     else if (a === '--force') out.flags.force = true;
-    else if (a === '--identifier-ref' || a === '-i') out.flags.identifierRef = argv[++i];
-    else if (a === '--password-ref' || a === '-p') out.flags.passwordRef = argv[++i];
-    else if (a === '--submit-ref' || a === '-s') out.flags.submitRef = argv[++i];
-    else if (a === '--remember-ref' || a === '-r') out.flags.rememberRef = argv[++i];
+    else if (a === '--identifier-ref' || a === '-i') out.flags.identifierRef = val(a);
+    else if (a === '--password-ref' || a === '-p') out.flags.passwordRef = val(a);
+    else if (a === '--submit-ref' || a === '-s') out.flags.submitRef = val(a);
+    else if (a === '--remember-ref' || a === '-r') out.flags.rememberRef = val(a);
     else if (a === '--no-hints') out.flags.noHints = true;
     else if (a === '--global') out.flags.global = true;
     else if (a === '--project') out.flags.projectScope = true;
@@ -430,11 +441,11 @@ function parseArgs(argv) {
     else if (a === '--on') out.flags.on = true;
     else if (a === '--paste') out.flags.paste = true;
     else if (a === '--keys') out.flags.keys = true;
-    else if (a === '--from') out.flags.from = argv[++i];
+    else if (a === '--from') out.flags.from = val(a);
     else if (a === '--wait') out.flags.wait = true;
     else if (a === '--passkey') out.flags.passkey = true;
-    else if (a === '--passkey-label') { out.flags.passkey = true; out.flags.passkeyLabel = argv[++i]; }
-    else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
+    else if (a === '--passkey-label') { out.flags.passkey = true; out.flags.passkeyLabel = val(a); }
+    else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(val(a)) || 180);
     else out._.push(a);
   }
   return out;
