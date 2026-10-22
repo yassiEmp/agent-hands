@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { scrollBy, refuseCovered } from './gestures.mjs';
+import { childFrames, inFrame, frameOffset } from './frames.mjs';
 
 const STATE = path.join(os.homedir(), '.agent-browser', 'humanize');
 const refsFile = key => path.join(STATE, `${key}.refs.json`);
@@ -129,11 +130,35 @@ const WALK = (interactive, structural, max) => `(() => {
 export async function capture(cdp, { max = 300 } = {}) {
   const raw = await cdp.evaluate(WALK(INTERACTIVE, STRUCTURAL, max));
   const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const nodes = [...data.nodes, ...await frameNodes(cdp, data, max)];
   const refs = {};
-  data.nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
+  nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
   return { v: 1, key: cdp.key, targetId: cdp.targetId ?? null, url: data.url, title: data.title,
            viewport: { w: data.vw, h: data.vh }, scroll: { x: data.sx, y: data.sy },
            truncated: data.truncated, refs };
+}
+
+// The fields inside cross-origin frames, in page coordinates. Each frame gets
+// one heading ref, so the agent sees where the fields live.
+async function frameNodes(cdp, top, max) {
+  const out = [];
+  for (const f of await childFrames(cdp)) {
+    let data;
+    try {
+      const raw = await inFrame(cdp, f.targetId, WALK(INTERACTIVE, STRUCTURAL, max));
+      data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch { continue; }
+    if (!data?.nodes?.length) continue;
+    const frame = { targetId: f.targetId, url: data.url };
+    const off = (y, h) => y + h / 2 < 0 || y - h / 2 > top.vh;
+    out.push({ tag: 'iframe', name: new URL(data.url).host, depth: f.depth, frameBox: true, frame,
+               x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, off: off(f.oy + f.h / 2, f.h) });
+    for (const n of data.nodes) {
+      const y = n.y + f.oy;
+      out.push({ ...n, x: n.x + f.ox, y, depth: n.depth + f.depth + 1, frame, off: off(y, n.h) });
+    }
+  }
+  return out;
 }
 
 export function save(key, snap) {
@@ -193,7 +218,8 @@ export function render(snap) {
 
 // Re-resolve a stored ref against the live page. Cached coordinates alone are
 // wrong: an agent snapshots, scrolls, then clicks.
-const RELOCATE = (p, sel, tag) => `(() => {
+// The page expression for a stored element: its child-index path, else its selector.
+const FIND = (p, sel, tag) => `(() => {
   const walk = path => {
     let n = document.documentElement;
     for (const i of path) {
@@ -205,7 +231,19 @@ const RELOCATE = (p, sel, tag) => `(() => {
   const ok = el => el && el.tagName && el.tagName.toLowerCase() === ${JSON.stringify(tag)};
   let el = walk(${JSON.stringify(p)});
   if (!ok(el)) el = document.querySelector(${JSON.stringify(sel)});
-  if (!ok(el)) return null;
+  return ok(el) ? el : null;
+})()`;
+
+// The <iframe> whose content box starts at (ox, oy): the owner of a frame ref,
+// as the page sees it. Page JS cannot name a cross-origin frame any other way.
+const FRAME_AT = (ox, oy) => `[...document.querySelectorAll('iframe')].find(f => {
+  const r = f.getBoundingClientRect();
+  return Math.abs(r.x + f.clientLeft - ${ox}) < 2 && Math.abs(r.y + f.clientTop - ${oy}) < 2;
+}) || null`;
+
+const RELOCATE = (p, sel, tag) => `(() => {
+  const el = ${FIND(p, sel, tag)};
+  if (!el) return null;
   const r = el.getBoundingClientRect();
   const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
   const top = document.elementFromPoint(cx, cy);
@@ -239,16 +277,44 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
   if (box.y < 0 || box.y > box.vh) {
-    await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed);
+    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e.path, e.sel, e.tag);
+    await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed, { near });
     box = await read(cdp, e) || box;
   }
   refuseCovered(box, `@${id} ("${e.name || e.tag}")`, force);
-  return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag };
+  return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag, ...(box.frame && { frame: box.frame }) };
+}
+
+// A nested frame's own <iframe> lives inside another frame, so the page scrolls
+// the outermost frame that contains it.
+async function rootFrameOwner(cdp, frame) {
+  const frames = await childFrames(cdp);
+  const f = frames.find(x => x.targetId === frame.targetId);
+  const root = f && f.depth > 0
+    ? frames.find(x => x.depth === 0 && f.ox >= x.ox && f.oy >= x.oy && f.ox < x.ox + x.w && f.oy < x.oy + x.h)
+    : f;
+  if (!root) return 'null';
+  // The frame moves while it scrolls, so a position match fails after the
+  // first step. Resolve it once to an index, which the scroll does not change.
+  const i = await cdp.evaluate(`[...document.querySelectorAll('iframe')].indexOf(${FRAME_AT(root.ox, root.oy)})`);
+  return i >= 0 ? `document.querySelectorAll('iframe')[${i}]` : 'null';
 }
 
 async function read(cdp, e) {
-  const raw = await cdp.evaluate(RELOCATE(e.path, e.sel, e.tag));
-  return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+  if (!e.frame) {
+    const raw = await cdp.evaluate(RELOCATE(e.path, e.sel, e.tag));
+    return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+  }
+  // Inside a frame: find where the frame sits now, then the element inside it.
+  const f = await frameOffset(cdp, e.frame.targetId);
+  if (!f) return null;
+  const vh = await cdp.evaluate('innerHeight');
+  const frame = { targetId: f.targetId, ox: f.ox, oy: f.oy };
+  if (e.frameBox) return { x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, tag: 'IFRAME', vh, frame };
+  const raw = await inFrame(cdp, f.targetId, RELOCATE(e.path, e.sel, e.tag)).catch(() => null);
+  if (!raw) return null;
+  const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame };
 }
 
 // The flag that reaches this same browser again. The store key carries the

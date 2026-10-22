@@ -237,6 +237,34 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — cross-origin frames, inner scroll containers
+
+Reported by an agent paying a Stripe sandbox checkout: the card section did
+not appear, and nothing it clicked opened it. Two bugs.
+
+1. **`snapshot` never saw inside a cross-origin iframe.** It was one
+   `Runtime.evaluate` in the top document, and page JS cannot cross that
+   boundary. The docs claimed the opposite. `cli/frames.mjs` lists `iframe`
+   targets, keeps those whose `<iframe>` `DOM.getFrameOwner` finds in the page
+   (one level down for nested frames), attaches for one evaluate, and adds the
+   owner's content-box offset. A frame ref stores the frame's targetId and is
+   re-resolved at click time. Input needs nothing special: page-coordinate
+   mouse events reach the frame, keys go to the focused frame. `fill` and
+   `type` check editability inside the frame. Measured: card number, expiry
+   and CVC filled in a localhost-in-127.0.0.1 frame through a launched Edge and
+   through the relay; Stripe's Payment Element frame and the hCaptcha frame
+   nested in it both listed on docs.stripe.com.
+2. **`scrollBy` only scrolled `window`.** Pages that scroll an inner container
+   (docs.stripe.com, many apps) did not move, and a click on an offscreen ref
+   landed outside the viewport. It now scrolls the nearest scrollable
+   ancestor of the target (for a frame ref, of its `<iframe>`, found once by
+   index because a position match breaks while it scrolls).
+
+Not verified: a real checkout.stripe.com session end to end. The docs demo's
+"Card" item did not expand on click; that frame is
+`elements-inner-accessory-target` and may be a preview. `text` still reads
+the top document only.
+
 ## Unreleased (22 Oct 2026) — long text: paste, hurry, --from
 
 Typing is ~180 ms a character at speed 1, so a long text outlived the agent's

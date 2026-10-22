@@ -210,7 +210,24 @@ export async function pressKey(cdp, name, speed) {
 // rhythm a wheel produces. The native `scroll` event still fires, so lazy
 // loading and IntersectionObserver behave normally. Pages listening for
 // `wheel` specifically will not see it.
-export async function scrollBy(cdp, deltaY, speed) {
+// The element that actually scrolls: the nearest ancestor with overflow and
+// room to move, else the window. Many apps (docs sites, dashboards, chat UIs)
+// scroll an inner container and never the window, so window.scrollBy moved
+// nothing there and a click aimed at an offscreen ref landed outside the
+// viewport. Measured on docs.stripe.com, 22 Oct 2026. Found again on every
+// step, so nothing is stored on the page.
+const SCROLLER = `(el => {
+  for (let n = el && el.parentElement; n; n = n.parentElement) {
+    const s = getComputedStyle(n);
+    if (/(auto|scroll|overlay)/.test(s.overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+  }
+  return window;
+})`;
+const CENTRE = 'document.elementFromPoint(innerWidth / 2, innerHeight / 2)';
+
+// near: a page expression for the element to bring into view. Without it, the
+// scroller under the middle of the viewport moves, which is what a wheel does.
+export async function scrollBy(cdp, deltaY, speed, { near = CENTRE } = {}) {
   const t0 = Date.now();
   const dir = Math.sign(deltaY);
   const total = Math.abs(deltaY);
@@ -223,14 +240,15 @@ export async function scrollBy(cdp, deltaY, speed) {
     for (let i = 1; i <= frames; i++) {
       const eased = 1 - Math.pow(1 - i / frames, 3);
       const at = notch * eased;
-      cdp.fire('Runtime.evaluate', { expression: `window.scrollBy(0,${dir * (at - prev)})` });
+      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER}(${near}).scrollBy(0,${dir * (at - prev)})` });
       prev = at;
       await sleep(16);
     }
     done += notch;
     await sleep(rand(70, 260) / speed); // pause between bursts
   }
-  return { pixels: deltaY, ms: Date.now() - t0, y: await cdp.evaluate('Math.round(window.scrollY)') };
+  const y = await cdp.evaluate(`(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER}(${near}))`);
+  return { pixels: deltaY, ms: Date.now() - t0, y };
 }
 
 // ------------------------------------------------- element resolution

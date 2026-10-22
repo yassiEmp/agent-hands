@@ -31,6 +31,7 @@ import { insertText, clipboardPaste, PASTE_OVER } from '../cli/paste.mjs';
 import { register as registerTypist, running as typists, order as orderTypist } from '../cli/hurry.mjs';
 import { storeKey } from '../cli/cdp.mjs';
 import { noteAfterRun, starCommand } from '../cli/star.mjs';
+import { childFrames, inFrame } from '../cli/frames.mjs';
 import { handoffSocket, runHandoff, DEFAULT_HANDOFF_S, DEFAULT_WAIT_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
@@ -1126,15 +1127,29 @@ const FOCUS_EDITABLE = [
   '  const dead = /^(checkbox|radio|button|submit|reset|file|image|range|color)$/;',
   '  const ok = !!a && (a.tagName === "TEXTAREA" || a.isContentEditable',
   '    || (a.tagName === "INPUT" && !dead.test((a.getAttribute("type") || "text").toLowerCase())));',
-  '  return { editable: ok, at: a ? a.tagName.toLowerCase() + (a.id ? "#" + a.id : "") : "nothing" };',
+  '  return { editable: ok, focused: document.hasFocus(), at: a ? a.tagName.toLowerCase() + (a.id ? "#" + a.id : "") : "nothing" };',
   '})()',
 ].join(String.fromCharCode(10));
 
 async function requireEditable(cdp, target, cmd) {
   const NL2 = String.fromCharCode(10);
-  const r = target
-    ? await cdp.evaluate(EDITABLE_AT(Math.round(target.x), Math.round(target.y)))
-    : await cdp.evaluate(FOCUS_EDITABLE);
+  let r;
+  if (target?.frame) {
+    // A field inside a cross-origin frame: ask the frame, in its own coordinates.
+    const { targetId, ox, oy } = target.frame;
+    r = await inFrame(cdp, targetId, EDITABLE_AT(Math.round(target.x - ox), Math.round(target.y - oy)));
+  } else {
+    r = target
+      ? await cdp.evaluate(EDITABLE_AT(Math.round(target.x), Math.round(target.y)))
+      : await cdp.evaluate(FOCUS_EDITABLE);
+    // Focus on an <iframe> means focus is somewhere inside it. Find the frame that holds it.
+    if (!target && r && /^iframe/.test(r.at)) {
+      for (const f of await childFrames(cdp)) {
+        const inner = await inFrame(cdp, f.targetId, FOCUS_EDITABLE).catch(() => null);
+        if (inner?.focused) { r = inner; break; }
+      }
+    }
+  }
   if (r && r.editable) return;
 
   const at = (r && r.at) || 'nothing';
