@@ -263,6 +263,18 @@ export function clearPending(key) {
 // ---------------------------------------------------------------- verb ----
 
 const hostOf = u => { try { return new URL(u).host; } catch { return 'the site'; } };
+
+// The window to raise is the one showing this tab, and Windows names a window
+// after its active tab. A fresh Edge profile opens a separate sync dialog
+// window on top, and without the title summon raised that one (22 Oct 2026).
+async function settledTitle(cdp, targetId) {
+  for (let i = 0; i < 10; i++) {
+    const t = await tabInfo(cdp, targetId).catch(() => null);
+    if (t?.title && !t.url.includes(t.title) && !blank(t.url)) return t.title;
+    await sleep(300);
+  }
+  return '';
+}
 const short = t => (t || '').slice(0, 60);
 
 // The whole verb: prepare the tab, call the human, optionally press the
@@ -294,7 +306,8 @@ export async function runHandoff(cdp, url, args) {
 
     // The raise must land before a passkey click: Windows Hello draws its
     // prompt over the focused window, and a background one leaves it hidden.
-    const called = summon(cdp, { message: `Sign in to ${pending.site}. The agent continues when you are in.` });
+    const title = await settledTitle(cdp, targetId);
+    const called = summon(cdp, { title, message: `Sign in to ${pending.site}. The agent continues when you are in.` });
     if (f.passkey) {
       pending.summon = await called;
       pending.passkey = await clickPasskey(cdp, targetId, { label: f.passkeyLabel, speed: args.speed });
