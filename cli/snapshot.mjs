@@ -413,7 +413,8 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag, ...(box.frame && { frame: box.frame }) };
 }
 
-const outside = b => b.y < 0 || b.y > b.vh;
+// A window that reports no height (minimised) cannot tell, so it never refuses.
+const outside = b => b.vh > 0 && (b.y < 0 || b.y > b.vh);
 
 // A press outside the window reaches nothing, so it must not report success.
 function refuseOutside(box, what) {

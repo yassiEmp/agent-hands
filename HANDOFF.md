@@ -272,7 +272,9 @@ page, then pressed outside the window and reported success. The frame's
 document now scrolls first, in the frame's session. Any ref still out of
 view after scrolling is refused with exit 8 (an element at top:-300px was
 "clicked" at y=-289 before). Not handled: a middle frame between the page
-and a nested frame that scrolls its own content.
+and a nested frame that scrolls its own content. Also open: the check is
+vertical only, so a ref offscreen to the left or right still gets a press
+that reaches nothing.
 
 ## Unreleased (22 Oct 2026) — a ref clicked the wrong button after the page changed
 
