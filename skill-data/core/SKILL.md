@@ -453,10 +453,10 @@ printf '%s\n' \
 ## Commands
 
 ```bash
-agent-hands click "#submit"                # css selector — most reliable
-agent-hands click --ref @e12               # snapshot ref — the only thing that works in iframes
-agent-hands click --text "Se connecter"    # visible text, ranked match
-agent-hands click --xy 420 300             # raw viewport coordinates
+agent-hands click --ref @e12               # DEFAULT: a ref from `agent-hands snapshot`
+agent-hands click "#submit"                # fallback: a stable id you already know
+agent-hands click --text "Se connecter"    # fallback: no snapshot yet, one obvious button
+agent-hands click --xy 420 300             # last resort: canvas apps with no elements
 agent-hands hover ".menu-item"
 agent-hands move --xy 200 400
 agent-hands fill "#email" "you@example.com"   # replaces existing text
@@ -504,15 +504,16 @@ Figma, 9 Sep 2026: twelve invocations lost to one modal.
 brings the tab forward. It takes the user's foreground, so use it only after
 a click that did nothing on a page with no cover.
 
-0. **Inside an iframe, use `--ref`.** CSS selectors and `--text` are evaluated
-   in page JS, which cannot cross a cross-origin frame boundary. Snapshot refs
-   carry frame context and reach inside. `--ref` scrolls the element into view
-   first, so an element below the fold needs no extra step. Refs go stale on
-   every page change: re-snapshot, then use the new ref.
-1. **Prefer a CSS selector.** `--text` ranks candidates — exact over partial,
-   real text over `aria-label`, button over field — but a page with several
-   "Search" controls can still resolve the wrong one. Get refs from
-   `agent-hands snapshot`, which works on a browser agent-browser cannot reach.
+0. **Target with `--ref`.** Run `agent-hands snapshot`, read the field, use its
+   ref. You see what you aim at, so there is no HTML to guess. Refs also reach
+   inside iframes, where selectors and `--text` cannot go, and `--ref` scrolls
+   the element into view first. A ref goes stale when the page changes:
+   snapshot again, then use the new ref.
+1. **Use the fallbacks only for their one case.** A CSS selector: you already
+   know a stable id and the page changes often. `--text` or `--label`: you
+   have not taken a snapshot and the button is unique. `--text` ranks
+   candidates, so on a page with several "Search" controls it can pick the
+   wrong one.
 2. **Submit with `press Enter`.** Do not hunt for the submit button. Verified:
    `fill "#searchbox_input"` then `press Enter` returns real results.
 3. **`fill` replaces; `type` does not.** `fill` clicks, selects all, then types,
@@ -525,8 +526,7 @@ a click that did nothing on a page with no cover.
    `<div>` COVERS its children, so clicking one focuses whichever input lies under
    that point. Aiming at a form ref used to type the identifier into the password
    box and report `tag:"FORM", replaced:true`. Target the input itself.
-4. **Re-resolve after the page changes.** Selectors are resolved fresh on every
-   command, so this is automatic — but re-snapshot before choosing a new one.
+4. **Re-snapshot after the page changes.** Old refs then point at nothing.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to
    be. Roughly one page action every 2 to 3 seconds.
 
