@@ -30,13 +30,9 @@ const STRUCTURAL = 'header,nav,main,footer,form,dialog,[role=dialog],iframe';
 // of a page where the user is logged in with real credentials is exactly the
 // automation tell that the Bezier motion exists to avoid, and a React re-render
 // drops it anyway. A path leaves the page byte-identical.
-const WALK = (interactive, structural, max) => `(() => {
-  const INTERACTIVE = ${JSON.stringify(interactive)};
-  const STRUCTURAL = ${JSON.stringify(structural)};
-  const out = [];
-  const seen = new Map();
-
-  const nameOf = el => {
+// In-page source shared by the walk and the re-find. With `field` set, the name
+// skips the text and the value, which typing changes.
+const NAME_OF = `(el, field) => {
     const t = s => (s || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
     if (el.getAttribute('aria-label')) return t(el.getAttribute('aria-label'));
     const lb = el.getAttribute('aria-labelledby');
@@ -50,8 +46,21 @@ const WALK = (interactive, structural, max) => `(() => {
     }
     const wrap = el.closest && el.closest('label');
     if (wrap && wrap !== el) return t(wrap.innerText);
+    if (field) return t(el.title || el.placeholder || el.getAttribute('name') || '');
     return t(el.alt || el.title || el.placeholder || el.innerText || el.value || '');
-  };
+  }`;
+
+// The identity a ref is checked against at click time.
+const IDENT_OF = `el => nameOf(el, el.matches('input,textarea,select') || el.isContentEditable)`;
+
+const WALK = (interactive, structural, max) => `(() => {
+  const INTERACTIVE = ${JSON.stringify(interactive)};
+  const STRUCTURAL = ${JSON.stringify(structural)};
+  const out = [];
+  const seen = new Map();
+
+  const nameOf = ${NAME_OF};
+  const identOf = ${IDENT_OF};
 
   const pathOf = el => {
     const p = [];
@@ -116,7 +125,7 @@ const WALK = (interactive, structural, max) => `(() => {
       depth,
       x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height,
       off: r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw,
-      path: pathOf(el), sel: selOf(el),
+      path: pathOf(el), sel: selOf(el), ident: identOf(el),
     });
   }
   return JSON.stringify({
@@ -217,8 +226,15 @@ export function render(snap) {
 
 // Re-resolve a stored ref against the live page. Cached coordinates alone are
 // wrong: an agent snapshots, scrolls, then clicks.
-// The page expression for a stored element: its child-index path, else its selector.
-const FIND = (p, sel, tag) => `(() => {
+// The page expression for a stored element: its child-index path, else its
+// selector, else the one element of its tag with its name. Path and selector
+// are both positions. When a form inserts a section, the path lands on the
+// next button along, so a match also needs the same name. Measured on the
+// Cloudflare R2 token form: Create resolved to Cancel and was clicked.
+const FIND = e => `(() => {
+  const nameOf = ${NAME_OF};
+  const identOf = ${IDENT_OF};
+  const tag = ${JSON.stringify(e.tag)}, ident = ${JSON.stringify(e.ident ?? null)};
   const walk = path => {
     let n = document.documentElement;
     for (const i of path) {
@@ -227,9 +243,14 @@ const FIND = (p, sel, tag) => `(() => {
     }
     return n;
   };
-  const ok = el => el && el.tagName && el.tagName.toLowerCase() === ${JSON.stringify(tag)};
-  let el = walk(${JSON.stringify(p)});
-  if (!ok(el)) el = document.querySelector(${JSON.stringify(sel)});
+  const ok = el => el && el.tagName && el.tagName.toLowerCase() === tag
+    && (ident === null || identOf(el) === ident);
+  let el = walk(${JSON.stringify(e.path)});
+  if (!ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
+  if (!ok(el) && ident) {
+    const named = [...document.querySelectorAll(tag)].filter(ok);
+    el = named.length === 1 ? named[0] : null;
+  }
   return ok(el) ? el : null;
 })()`;
 
@@ -240,8 +261,8 @@ const FRAME_AT = (ox, oy) => `[...document.querySelectorAll('iframe')].find(f =>
   return Math.abs(r.x + f.clientLeft - ${ox}) < 2 && Math.abs(r.y + f.clientTop - ${oy}) < 2;
 }) || null`;
 
-const RELOCATE = (p, sel, tag) => `(() => {
-  const el = ${FIND(p, sel, tag)};
+const RELOCATE = e => `(() => {
+  const el = ${FIND(e)};
   if (!el) return null;
   const r = el.getBoundingClientRect();
   const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
@@ -271,12 +292,13 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   }
 
   let box = await read(cdp, e);
-  if (!box) throw usage(`@${id} ("${e.name || e.tag}") is no longer on the page. Re-snapshot.`);
+  if (!box) throw usage(`@${id} ("${e.name || e.tag}") is no longer on the page, or the page changed around it.\n` +
+    `  Refs are numbered again on every snapshot. Re-run: agent-hands snapshot${flagFor(cdp)}`);
 
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
   if (box.y < 0 || box.y > box.vh) {
-    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e.path, e.sel, e.tag);
+    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e);
     await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed, { near });
     box = await read(cdp, e) || box;
   }
@@ -301,7 +323,7 @@ async function rootFrameOwner(cdp, frame) {
 
 async function read(cdp, e) {
   if (!e.frame) {
-    const raw = await cdp.evaluate(RELOCATE(e.path, e.sel, e.tag));
+    const raw = await cdp.evaluate(RELOCATE(e));
     return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
   }
   // Inside a frame: find where the frame sits now, then the element inside it.
@@ -310,7 +332,7 @@ async function read(cdp, e) {
   const vh = await cdp.evaluate('innerHeight');
   const frame = { targetId: f.targetId, ox: f.ox, oy: f.oy };
   if (e.frameBox) return { x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, tag: 'IFRAME', vh, frame };
-  const raw = await inFrame(cdp, f.targetId, RELOCATE(e.path, e.sel, e.tag)).catch(() => null);
+  const raw = await inFrame(cdp, f.targetId, RELOCATE(e)).catch(() => null);
   if (!raw) return null;
   const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
   return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame };

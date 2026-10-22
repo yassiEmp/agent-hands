@@ -237,6 +237,27 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — a ref clicked the wrong button after the page changed
+
+Reported by an agent creating a Cloudflare R2 token: its click on the
+"Create" ref hit "Cancel", and an earlier radio click selected the wrong
+permission. The CLI reported success both times. A ref finds its element
+again by child-index path, then by an `nth-of-type` selector. Both are
+positions, and the check compared only the tag. The form inserts and removes
+a section when the permission changes, so the path landed on the next
+element of the same tag.
+
+The fix: each ref stores `ident`, its accessible name. A field's `ident`
+skips its text and value, because typing changes them. A match now needs
+the tag and the `ident`. When path and selector both fail, the one element
+of that tag with that `ident` wins. Otherwise the command fails and says to
+snapshot again. Refs saved by an older version have no `ident` and keep the
+old check.
+
+Measured on a local page: snapshot, remove a section above two buttons, then
+click the Cancel ref. 0.19.1 clicked Create. The fix clicks Cancel. A field
+ref filled twice in a row still resolves.
+
 ## Unreleased (22 Oct 2026) — cross-origin frames, inner scroll containers
 
 Reported by an agent paying a Stripe sandbox checkout: the card section did
