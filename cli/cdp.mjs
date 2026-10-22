@@ -327,8 +327,8 @@ export class CDP {
   }
 
   // Input.* and in-page scroll writes: send, do not await. See header note.
-  fire(method, params = {}) {
-    this.ws.send(JSON.stringify(this.envelope(method, params, ++this.id)));
+  fire(method, params = {}, session) {
+    this.ws.send(JSON.stringify(this.envelope(method, params, ++this.id, session ?? this.sessionId)));
   }
 
   async evaluate(expression) {
@@ -462,8 +462,8 @@ export class DaemonCDP extends CDP {
   }
 
   // No id: the daemon relays without tracking a reply. See CDP.fire.
-  fire(method, params = {}) {
-    this.#write(this.envelope(method, params, null));
+  fire(method, params = {}, session) {
+    this.#write(this.envelope(method, params, null, session ?? this.sessionId));
   }
 
   // Closing a client must not close the shared browser socket. Tear the pipe

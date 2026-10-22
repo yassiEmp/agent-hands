@@ -656,6 +656,15 @@ const endpoint = { ...resolution.endpoint,
         await requireEditable(cdp, target, 'fill');
         await clickAt(cdp, session, target, target.w, speed);
         await sleep(lognormal(180, 0.4, 500));
+        // A press into a frame can miss and leave focus outside it; typing then
+        // lands nowhere while the result says ok. Check before a key is sent.
+        if (target.frame) {
+          const f = await inFrame(cdp, target.frame.targetId, FOCUS_EDITABLE).catch(() => null);
+          if (!f?.editable) {
+            throw Object.assign(new Error(`fill refused. The click did not put focus in the field inside the frame (focus: <${f?.at ?? 'unknown'}>).\n` +
+              '  Nothing was typed. Re-run snapshot and retry once.'), { code: 'ENOTEDITABLE' });
+          }
+        }
         const replaced = !args.flags.append;
         // A click puts the caret where it landed, mid-text. Select all to
         // overwrite, or jump to the end so --append really appends.

@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { scrollBy, refuseCovered } from './gestures.mjs';
-import { childFrames, inFrame, frameOffset } from './frames.mjs';
+import { childFrames, inFrame, frameOffset, evaluateIn } from './frames.mjs';
 
 const STATE = path.join(os.homedir(), '.agent-browser', 'humanize');
 const refsFile = key => path.join(STATE, `${key}.refs.json`);
@@ -141,15 +141,14 @@ export async function capture(cdp, { max = 300 } = {}) {
 // The fields inside cross-origin frames, in page coordinates. Each frame gets
 // one heading ref, so the agent sees where the fields live.
 async function frameNodes(cdp, top, max) {
+  const walk = WALK(INTERACTIVE, STRUCTURAL, max);
+  const frames = await childFrames(cdp, { onFrame: (f, sid) => evaluateIn(cdp, sid, walk) });
   const out = [];
-  for (const f of await childFrames(cdp)) {
+  for (const f of frames) {
     let data;
-    try {
-      const raw = await inFrame(cdp, f.targetId, WALK(INTERACTIVE, STRUCTURAL, max));
-      data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch { continue; }
+    try { data = typeof f.result === 'string' ? JSON.parse(f.result) : f.result; } catch { continue; }
     if (!data?.nodes?.length) continue;
-    const frame = { targetId: f.targetId, url: data.url };
+    const frame = { targetId: f.targetId, url: data.url, depth: f.depth };
     const off = (y, h) => y + h / 2 < 0 || y - h / 2 > top.vh;
     out.push({ tag: 'iframe', name: new URL(data.url).host, depth: f.depth, frameBox: true, frame,
                x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, off: off(f.oy + f.h / 2, f.h) });
@@ -306,7 +305,7 @@ async function read(cdp, e) {
     return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
   }
   // Inside a frame: find where the frame sits now, then the element inside it.
-  const f = await frameOffset(cdp, e.frame.targetId);
+  const f = await frameOffset(cdp, e.frame.targetId, e.frame.depth ?? 1);
   if (!f) return null;
   const vh = await cdp.evaluate('innerHeight');
   const frame = { targetId: f.targetId, ox: f.ox, oy: f.oy };

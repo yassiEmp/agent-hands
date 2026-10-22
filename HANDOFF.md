@@ -260,6 +260,23 @@ not appear, and nothing it clicked opened it. Two bugs.
    ancestor of the target (for a frame ref, of its `<iframe>`, found once by
    index because a position match breaks while it scrolls).
 
+3. **A press into a frame missed in a background tab.** After a script
+   scroll, Chromium's hit-test map for the frame stays stale while the tab
+   renders nothing, so a page-level press at the right point hit the parent:
+   fill reported ok with the field empty. The press now goes to the frame's
+   own session in frame coordinates (keys follow focus on their own), and
+   fill checks focus inside the frame before it types. Measured on both
+   routes: value present.
+4. **Cost.** The first frame walk took 4.75 s on docs.stripe.com (11 frames,
+   one at a time, two attaches each). Frames under 8 px are skipped, frames
+   run in parallel inside one attach: 0.18 s. A page without frames pays
+   ~35-50 ms; the owner's Edge (9 iframe targets) snapshots in 49 ms.
+
+History: the iframe claim dates from 0dec9d2 (30 Jul 2026), when `--ref`
+came from `agent-browser snapshot -i`, whose refs do reach frames. 55cc317
+replaced that with this CLI's own DOM walk and dropped frames; the docs kept
+the claim. So frames were the intended behaviour, and this is a regression.
+
 Not verified: a real checkout.stripe.com session end to end. The docs demo's
 "Card" item did not expand on click; that frame is
 `elements-inner-accessory-target` and may be a preview. `text` still reads

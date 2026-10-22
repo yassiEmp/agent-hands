@@ -68,17 +68,38 @@ export async function moveTo(cdp, session, to, width, speed, { held = false } = 
 export async function clickAt(cdp, session, to, width, speed) {
   const move = await moveTo(cdp, session, to, width, speed);
   await sleep(lognormal(90, 0.45, 320)); // settle before pressing
+  // A target inside a cross-origin frame gets its press in the frame's own
+  // session, in frame coordinates. In a background tab Chromium's map of where
+  // the frame sits goes stale after a scroll, and a page-level press at the
+  // right point landed on the parent page: focus never reached the field and
+  // fill typed into nothing. Measured 22 Oct 2026; the frame session hit it.
+  const frame = to.frame ? await attachFrame(cdp, to.frame.targetId) : null;
+  const at = frame ? { x: to.x - to.frame.ox, y: to.y - to.frame.oy } : to;
   const base = {
-    x: Math.round(to.x), y: Math.round(to.y),
+    x: Math.round(at.x), y: Math.round(at.y),
     button: 'left', clickCount: 1, pointerType: 'mouse',
   };
-  // buttons is the bitmask a pointerdown handler reads. Without it Chrome
-  // reports buttons:0 on the press, and an app that checks event.buttons
-  // sees a press with no button down. Figma's "New file" ignored exactly that.
-  cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 1, type: 'mousePressed', timestamp: Date.now() / 1000 });
-  await sleep(lognormal(72, 0.35, 200)); // button dwell
-  cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 0, type: 'mouseReleased', timestamp: Date.now() / 1000 });
+  try {
+    if (frame) cdp.fire('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', buttons: 0 }, frame);
+    // buttons is the bitmask a pointerdown handler reads. Without it Chrome
+    // reports buttons:0 on the press, and an app that checks event.buttons
+    // sees a press with no button down. Figma's "New file" ignored exactly that.
+    cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 1, type: 'mousePressed', timestamp: Date.now() / 1000 }, frame);
+    await sleep(lognormal(72, 0.35, 200)); // button dwell
+    cdp.fire('Input.dispatchMouseEvent', { ...base, buttons: 0, type: 'mouseReleased', timestamp: Date.now() / 1000 }, frame);
+  } finally {
+    if (frame) {
+      await cdp.send('Runtime.evaluate', { expression: '0' }, frame).catch(() => {});   // flush before detaching
+      await cdp.send('Target.detachFromTarget', { sessionId: frame }, null).catch(() => {});
+    }
+  }
   return move;
+}
+
+async function attachFrame(cdp, targetId) {
+  try {
+    return (await cdp.send('Target.attachToTarget', { targetId, flatten: true }, null)).sessionId;
+  } catch { return null; }
 }
 
 // Press at one point, travel with the button held, release at another. A

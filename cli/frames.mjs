@@ -8,8 +8,15 @@
 // and places frame coordinates in page coordinates. Input needs nothing
 // special: a mouse event at page coordinates reaches the frame under it, and
 // keys go to whichever frame holds focus.
+//
+// COST. The first version visited frames one at a time and attached to each
+// twice: a snapshot of docs.stripe.com (11 frames) took 4.75 s. Most of those
+// frames are 0-1 px helpers (controller, analytics, invisible captcha) that
+// hold nothing to click. Frames under MIN_PX are skipped, frames are visited
+// in parallel, and the caller's work runs inside the same attach.
 
 const MAX_DEPTH = 3;
+const MIN_PX = 8;
 
 // A child frame belongs to this page when DOM.getFrameOwner finds its <iframe>
 // in the page. Its content box gives the offset from frame to page coordinates.
@@ -38,34 +45,47 @@ export async function evaluateIn(cdp, sessionId, expression) {
   return r.result?.value;
 }
 
-// Every cross-origin frame inside the current page, nested ones included, with
-// its offset from the page's top-left corner. The page session is cdp.sessionId
-// (null on a launched browser's page socket, where calls go to the page).
-export async function childFrames(cdp) {
-  let infos;
-  try { ({ targetInfos: infos } = await cdp.send('Target.getTargets', {}, null)); } catch { return []; }
-  const iframes = infos.filter(t => t.type === 'iframe');
-  if (!iframes.length) return [];
+async function iframeTargets(cdp) {
+  try {
+    const { targetInfos } = await cdp.send('Target.getTargets', {}, null);
+    return targetInfos.filter(t => t.type === 'iframe');
+  } catch { return []; }
+}
+
+// Every visible cross-origin frame inside the current page, nested ones
+// included, with its offset from the page's top-left corner. onFrame(frame,
+// sessionId) runs while the frame is attached; its result lands in frame.result.
+export async function childFrames(cdp, { onFrame = null } = {}) {
+  const pending = await iframeTargets(cdp);
+  if (!pending.length) return [];
+  const found = [];
+  const claimed = new Set();
 
   // A frame nested in another cross-origin frame has its <iframe> in that
   // frame's DOM, so getFrameOwner fails from the page and succeeds one level down.
-  const found = [];
   const visit = async (session, base, depth) => {
-    if (depth > MAX_DEPTH) return;
-    for (const t of iframes) {
-      if (found.some(f => f.targetId === t.targetId)) continue;
-      const box = await ownerBox(cdp, t.targetId, session);
-      if (!box) continue;
-      const frame = { targetId: t.targetId, url: t.url, ox: base.ox + box.ox, oy: base.oy + box.oy,
-                      w: box.w, h: box.h, depth };
-      found.push(frame);
-      const sid = await attach(cdp, t.targetId).catch(() => null);
-      if (!sid) continue;
-      try { await visit(sid, frame, depth + 1); } finally { await detach(cdp, sid); }
-    }
+    const open = pending.filter(t => !claimed.has(t.targetId));
+    const boxes = await Promise.all(open.map(t => ownerBox(cdp, t.targetId, session)));
+    const mine = [];
+    open.forEach((t, i) => {
+      const b = boxes[i];
+      if (!b || claimed.has(t.targetId)) return;
+      claimed.add(t.targetId);
+      if (b.w < MIN_PX || b.h < MIN_PX) return;
+      mine.push({ targetId: t.targetId, url: t.url, ox: base.ox + b.ox, oy: base.oy + b.oy, w: b.w, h: b.h, depth });
+    });
+    found.push(...mine);
+    await Promise.all(mine.map(async f => {
+      const sid = await attach(cdp, f.targetId).catch(() => null);
+      if (!sid) return;
+      try {
+        if (onFrame) f.result = await onFrame(f, sid).catch(() => null);
+        if (depth + 1 <= MAX_DEPTH) await visit(sid, f, depth + 1);
+      } finally { await detach(cdp, sid); }
+    }));
   };
   await visit(cdp.sessionId ?? undefined, { ox: 0, oy: 0 }, 0);
-  return found;
+  return found.sort((a, b) => a.depth - b.depth || a.oy - b.oy || a.ox - b.ox);
 }
 
 // Run an expression inside one frame. The session lives for this call only:
@@ -75,8 +95,12 @@ export async function inFrame(cdp, targetId, expression) {
   try { return await evaluateIn(cdp, sid, expression); } finally { await detach(cdp, sid); }
 }
 
-// Where a frame sits in the page now. The page may have scrolled since the snapshot.
-export async function frameOffset(cdp, targetId) {
-  const frames = await childFrames(cdp);
-  return frames.find(f => f.targetId === targetId) ?? null;
+// Where a frame sits in the page now. The page may have scrolled since the
+// snapshot. A top-level frame costs two calls; only a nested one needs the search.
+export async function frameOffset(cdp, targetId, depth = 0) {
+  if (depth === 0) {
+    const b = await ownerBox(cdp, targetId, cdp.sessionId ?? undefined);
+    if (b) return { targetId, ox: b.ox, oy: b.oy, w: b.w, h: b.h, depth: 0 };
+  }
+  return (await childFrames(cdp)).find(f => f.targetId === targetId) ?? null;
 }
