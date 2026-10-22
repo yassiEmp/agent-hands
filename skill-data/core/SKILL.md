@@ -463,9 +463,9 @@ agent-hands fill "#email" "you@example.com"   # replaces existing text
 agent-hands fill --ref @e63 "text"            # with --ref, text is the first arg
 agent-hands fill "#note" " more" --append     # keep old text, append at the end
 agent-hands type "into whatever has focus"
-agent-hands fill "#body" --from draft.md       # the text from a file; over 300 chars it is pasted
-agent-hands fill "#key" --from env:API_KEY     # a secret stays out of the command line
-agent-hands fill "#bio" "short" --paste        # paste even a short text; --keys types even a long one
+agent-hands fill --ref @e7 --from draft.md     # the text from a file; over 300 chars it is pasted
+agent-hands fill --ref @e9 --from env:API_KEY  # a secret stays out of the command line
+agent-hands fill --ref @e4 "short" --paste     # paste even a short text; --keys types even a long one
 agent-hands hurry                              # a type/fill already running pastes the rest
 agent-hands press Enter                    # Tab Escape Backspace Delete Home End Arrow*
 agent-hands press r                        # any single character; Ctrl+z, Shift+Enter
