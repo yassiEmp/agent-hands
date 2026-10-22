@@ -371,12 +371,17 @@ function parseArgs(argv) {
   const out = { session: process.env.AGENT_HANDS_SESSION || 'work', speed: Number(process.env.AGENT_HANDS_SPEED) || 1, json: false, quiet: false, _: [], flags: {} };
   // A flag's value is the next word. A missing value used to take the next
   // flag as its value: `click --ref --cdp 52728` lost --cdp and fell back to
-  // the user's own browser. A value that starts with `--` is refused.
+  // the user's own browser. A value that is itself a flag is refused. Any
+  // other value passes, so a password such as "--s3cret" works and is never
+  // printed. An empty target (--cdp "") falls back the same way, so it is
+  // refused too.
   let i = 0;
   const val = flag => {
     const v = argv[++i];
-    if (v === undefined || v.startsWith('--')) {
-      throw Object.assign(new Error(`${flag} needs a value${v === undefined ? '' : `, got the flag ${v}`}.`), { code: 'EUSAGE' });
+    const empty = v === '' && TARGET_FLAGS.has(flag);
+    if (v === undefined || KNOWN_FLAGS.has(v) || empty) {
+      const got = v === undefined ? '' : empty ? ', got an empty value' : `, got the flag ${v}`;
+      throw Object.assign(new Error(`${flag} needs a value${got}.`), { code: 'EUSAGE' });
     }
     return v;
   };
@@ -450,6 +455,10 @@ function parseArgs(argv) {
   }
   return out;
 }
+
+// Every flag parseArgs knows, read from its own source so the list cannot drift.
+const KNOWN_FLAGS = new Set([...parseArgs.toString().matchAll(/a === '(-{1,2}[a-z][a-z-]*)'/g)].map(m => m[1]));
+const TARGET_FLAGS = new Set(['--ref', '--cdp', '--tab', '--browser', '--session', '--user-data-dir']);
 
 const CHALLENGE_WAIT_DEFAULT = 180000;
 const TAB_WHY = {
