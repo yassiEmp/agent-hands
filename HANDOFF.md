@@ -237,6 +237,35 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — handoff: summon, --start/--wait, passkey, cancel
+
+1. **The window comes to the user.** `cli/summon.ps1` shows a toast, flashes
+   the taskbar, and raises the browser frame (found by the pid from
+   `SystemInfo.getProcessInfo`) after 3 s with no physical keystroke. A raise
+   while the user types would send their keys into the sign-in form.
+   `GetLastInputInfo` is useless on the owner's machine: something injects
+   input every 700 ms. A `WH_KEYBOARD_LL` hook that skips `LLKHF_INJECTED`
+   replaces it. Measured: raise works from behind the terminal, 5.3 s with
+   the 3 s wait, toast and flash every run.
+2. **`--start` / `--wait`.** `--start` returns at once and writes
+   `~/.agent-browser/humanize/<key>.handoff.json`. `--wait` blocks for up to
+   540 s and can be repeated. Exit 7 keeps the pending file.
+3. **Exit 9 `ECANCEL`** when the user closes the sign-in tab.
+4. **Launched browsers detach too.** The page socket closes, and the wait
+   runs through the browser socket from `/json/version`. Measured: `attached`
+   false at 8 of 8 one-second samples.
+5. **`--passkey`** raises the window first (Windows Hello needs a focused
+   window), attaches, clicks the passkey button, detaches. Measured on a local
+   page: `navigator.userActivation.isActive` true at the click. The real
+   Windows Hello prompt was not triggered in the test.
+6. Popups need no special code. The watched tab stays open while a "Sign in
+   with Google" popup runs, and it redirects after the popup closes.
+
+Not measured: Google sign-in with a real account, in the owner's Edge and in
+a launched Edge. A dummy address only reaches "account not found". Build the
+clean relaunch (browser restarted without debugging flags for the sign-in)
+only if Google blocks the launched Edge.
+
 ## Unreleased (4 Oct 2026) — `handoff`, the human signs in for the agent
 
 An agent with no credentials opened the Inworld login in a background tab,

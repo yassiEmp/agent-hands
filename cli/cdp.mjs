@@ -344,6 +344,9 @@ export class CDP {
   // for the whole command, because Edge 154 freezes it again within 3s of
   // going to the background. Every call after an early hand-back hung.
   async drain() {
+    // handoff closes a launched browser's page socket early. A closed socket
+    // drops sends silently, so the flush would only burn its 2 s deadline.
+    if (this.ws && this.ws.readyState > 1) return;
     await withDeadline(this.evaluate('0').catch(() => {}), 2000);
     if (!this.restoreTo) return;
     const targetId = this.restoreTo;

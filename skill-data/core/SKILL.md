@@ -101,28 +101,48 @@ So an open debugging port is not itself the problem. The problem is
 When you have no credentials, the user signs in and you wait for the page. Do
 not ask for a password. Do not ask the user to come back and say "done".
 
-1. Tell the user in one line, BEFORE the command: "Sign in in the tab I put
-   in front of you. I continue by myself when you are in."
-2. Run the command. It blocks until the user is signed in:
+1. Tell the user in one line, BEFORE the command: "Sign in in the window I
+   brought up. I continue by myself when you are in."
+2. Start the handoff. It returns at once:
 
 ```bash
-agent-hands handoff https://app.example.com/login            # new tab, brought to front
-agent-hands handoff https://app.example.com/login --url /dashboard   # exact end condition
-agent-hands handoff                                          # the current tab
+agent-hands handoff https://app.example.com/login --start              # new tab
+agent-hands handoff https://accounts.google.com --passkey --start      # press the passkey button
+agent-hands handoff https://app.example.com/login --url /dashboard --start   # exact end condition
+agent-hands handoff --start                                            # the current tab
 ```
 
-3. Continue on the same tab. `handoff` remembers it, so the next command lands there.
+3. Wait. `--wait` blocks for up to 540 s, inside a 10 min shell limit. Exit 7
+   means the user is not done yet: run `--wait` again. Exit 9 means the user
+   closed the tab: ask them before you try again.
 
-`handoff` sends no input. It returns when the url no longer looks like a
+```bash
+agent-hands handoff --wait
+```
+
+4. Continue on the same tab. `handoff` remembers it. The result names your
+   earlier tab in `previousTab`, so `--tab` takes you back to it.
+
+`--start` shows a Windows toast and flashes the browser in the taskbar. It
+raises the browser window once the user has not typed for 3 s. That way the
+user's keystrokes never land in the sign-in form by accident.
+`AGENT_HANDS_NO_SUMMON=1` turns this off.
+
+`--passkey` presses the page's passkey button once and detaches. The user only
+confirms with Windows Hello, a security key or a phone. Never automate that
+confirmation. Never enable the CDP `WebAuthn` domain on the user's browser: it
+replaces their real authenticators with virtual ones. If the default words miss
+the button, give its text with `--passkey-label "<text>"`.
+
+`handoff` sends no other input. It ends when the url no longer looks like a
 sign-in url, and no password field and no "Sign in" or "Continue with" button
-is visible, for 2 s. On your own browser the tab carries no debugging session
-while the user types: `handoff` watches url and title from the tab list, and
-attaches only for one read to confirm. Use `--url` or `--text` when you know the page that follows the sign-in. The default timeout is 600 s
-(`--timeout <s>`). Exit 7 on timeout: run `agent-hands handoff` again to keep
-waiting on the same tab.
+is visible, for 2 s. Nothing is attached to the tab while the user types, on
+your own browser and on a launched one: `handoff` watches url and title from
+the tab list and attaches only for one read to confirm. Use `--url` or
+`--text` when you know the page that follows the sign-in.
 
-Your shell tool has its own timeout, often 120 s. Set it longer than
-`--timeout`, or run the command in the background, or the wait dies early.
+Without `--start` the command waits in one go for 600 s (`--timeout <s>`). Your
+shell tool has its own timeout, often 120 s, so prefer `--start` and `--wait`.
 
 `state` in the `--json` result is `already-signed-in` when the url redirected
 straight past the sign-in page. Then the user has nothing to do.
@@ -449,7 +469,7 @@ agent-hands drag --xy 300 300 --to-xy 500 420   # press, travel held, release: s
 agent-hands press Backspace --times 20     # one process, not twenty
 agent-hands scroll 600                     # negative scrolls up
 agent-hands where                          # last cursor position
-agent-hands handoff <url>                  # no credentials: the user signs in, you resume
+agent-hands handoff <url> --start          # no credentials: the user signs in; then handoff --wait
 agent-hands doctor                         # is the session reachable?
 ```
 

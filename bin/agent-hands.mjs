@@ -2,7 +2,8 @@
 // agent-hands — human-rate mouse and keyboard for a real Chromium browser.
 //
 // Exit codes: 0 ok, 1 runtime failure, 2 usage error, 3 challenge unresolved,
-// 4 sign-in page while flagged, 5 several browsers live (ask the user), 6 dead pin.
+// 4 sign-in page while flagged, 5 several browsers live (ask the user), 6 dead pin,
+// 7 wait timed out, 8 target covered, 9 the user closed the sign-in tab.
 
 import '../cli/require-node.mjs';   // exits on Node < 22 before anything below can throw
 import { readFileSync, createReadStream } from 'node:fs';
@@ -26,7 +27,7 @@ import { probeEndpoint } from '../cli/browsers.mjs';
 import { launch, browserChoices } from '../cli/launch.mjs';
 import { probeEnvironment, renderEnvironment, hasAgentBrowser } from '../cli/env.mjs';
 import { loginFlow } from '../cli/login.mjs';
-import { waitForHuman, prepareDetached, waitDetached, DEFAULT_HANDOFF_S } from '../cli/handoff.mjs';
+import { handoffSocket, runHandoff, DEFAULT_HANDOFF_S, DEFAULT_WAIT_S } from '../cli/handoff.mjs';
 import { inspect as inspectPage, verdict, explain as explainGuard } from '../cli/guard.mjs';
 import { conditionFrom, describe as describeCondition, holds, waitFor, nowOn, failMessage, DEFAULT_TIMEOUT_S } from '../cli/wait.mjs';
 
@@ -239,16 +240,23 @@ SIGNING IN
   NO CREDENTIALS? HAND THE SIGN-IN TO THE HUMAN. Never ask the user for a
   password, and never ask them to come back and say "done":
 
-    agent-hands handoff https://app.example.com/login
+    agent-hands handoff https://app.example.com/login --start   # returns at once
+    agent-hands handoff --wait                                  # blocks <= ${DEFAULT_WAIT_S}s; repeat
 
-  It opens the url in a new tab, brings that tab to the front, and returns once
-  the page stops looking like a sign-in page. The user signs in and the command
-  returns by itself. The tab is remembered, so your next command lands there.
-  Tell the user BEFORE you run it, in one line: "Sign in in the tab I put in
-  front of you. I continue by myself when you are in."
+  It opens the url in a new tab, shows a toast, flashes the taskbar, and raises
+  the browser window once the user has not typed for 3 s. Nothing is attached
+  to the tab while they sign in. --wait returns once the page stops looking
+  like a sign-in page. The tab is remembered, so your next command lands there.
+  Tell the user BEFORE you run it, in one line: "Sign in in the window I
+  brought up. I continue by myself when you are in."
+    --passkey         press the page's passkey button; the user only confirms
+                      (Windows Hello, a security key or a phone). Never automated.
+    --passkey-label <text>  the button text, when the default words miss it
     --url /dashboard  or  --text "Projects"   end on this instead of the guess
-    --timeout <s>     default ${DEFAULT_HANDOFF_S}. Your shell's own timeout must be longer.
-    no <url>          hand off the current tab. Exit 7 on timeout.
+    --timeout <s>     without --start the command waits ${DEFAULT_HANDOFF_S}s in one go.
+    no <url>          hand off the current tab.
+  Exit 7: timeout, still waiting (run --wait again). Exit 9: the user closed
+  the tab, so ask them before trying again.
 
 CHALLENGES
   A Cloudflare, DataDome, HUMAN, Akamai or captcha wall is not something this
@@ -403,6 +411,10 @@ function parseArgs(argv) {
     else if (a === '--global') out.flags.global = true;
     else if (a === '--project') out.flags.projectScope = true;
     else if (a === '--clear') out.flags.clear = true;
+    else if (a === '--start') out.flags.start = true;
+    else if (a === '--wait') out.flags.wait = true;
+    else if (a === '--passkey') out.flags.passkey = true;
+    else if (a === '--passkey-label') { out.flags.passkey = true; out.flags.passkeyLabel = argv[++i]; }
     else if (a === '--challenge-wait') out.flags.challengeWait = Math.max(5, Number(argv[++i]) || 180);
     else out._.push(a);
   }
@@ -477,7 +489,7 @@ const endpoint = { ...resolution.endpoint,
   // or wake one. With --tab it still picks, because that also re-targets.
   const pageless = cmd === 'tabs' && !args.tab
     // handoff opens its own tab, so probing the user's tabs would only touch them.
-    || (cmd === 'handoff' && Boolean(rest[0]) && !args.flags.here);
+    || (cmd === 'handoff' && (Boolean(rest[0]) || args.flags.wait) && !args.flags.here);
   const cdp = shared ?? await CDP.connect(pageless ? { ...endpoint, page: false } : endpoint);
   if (!shared) warnTabMatches(args, cdp);
   // Sign-in guard. Runs once per connection, after attach and before the verb,
@@ -681,32 +693,12 @@ const endpoint = { ...resolution.endpoint,
       // the front because the human must see it; then this only reads until
       // the page stops looking like a sign-in surface.
       case 'handoff': {
-        const url = rest[0];
-        const timeoutS = args.flags.timeout ?? DEFAULT_HANDOFF_S;
-        const condition = args.flags.url || args.flags.text ? conditionFrom(args, []) : null;
-        const onTick = ms => { if (!args.quiet && ms >= 60000 && ms % 60000 < 700) console.error(`  still waiting (${Math.round(ms / 60000)} min)`); };
-        // Through the relay the tab carries no session while the human types.
-        // A browser launched here has one socket per page and nothing to hide.
-        let r;
-        if (cdp instanceof DaemonCDP) {
-          const targetId = await prepareDetached(cdp, { url, here: args.flags.here });
-          rememberTab(cdp.key, { targetId, title: '', url: url ?? cdp.url });
-          if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab (nothing attached)…`);
-          r = await waitDetached(cdp, targetId, { condition, timeoutMs: timeoutS * 1000, onTick });
-        } else {
-          if (url) await cdp.send('Page.navigate', { url });
-          if (cdp.targetId) await cdp.send('Target.activateTarget', { targetId: cdp.targetId }, null).catch(() => {});
-          if (!args.quiet) console.error(`  waiting up to ${timeoutS}s for the human to sign in in the front tab…`);
-          r = await waitForHuman(cdp, { condition, timeoutMs: timeoutS * 1000, onTick });
+        const watcher = await handoffSocket(cdp, rest[0], args);
+        try {
+          return await runHandoff(watcher, rest[0], args);
+        } finally {
+          if (watcher !== cdp) watcher.close();
         }
-        if (!r.ok) {
-          throw Object.assign(new Error(
-            `no sign-in after ${timeoutS}s.\n  page now: "${(r.title || '').slice(0, 60)}" ${r.url}\n` +
-            '  To keep waiting on the same tab: agent-hands handoff --timeout <s>'), { code: 'EWAIT' });
-        }
-        const state = r.already ? 'already-signed-in' : 'signed-in';
-        return { data: { state, url: r.url, title: r.title, waitedMs: r.waitedMs },
-                 human: `✓ ${state} — "${(r.title || '').slice(0, 60)}" ${r.url}  (${(r.waitedMs / 1000).toFixed(0)}s)` };
       }
 
       case 'tabs': {
@@ -1580,7 +1572,7 @@ async function main() {
 
 // 3 is its own code so a caller can tell "a human needs to click something"
 // apart from a real failure, and retry instead of giving up.
-const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWAIT: 7, ECOVERED: 8 };
+const EXIT = { EUSAGE: 2, ECHALLENGE: 3, ELOGINPAGE: 4, ECHOOSE: 5, EPIN: 6, EWAIT: 7, ECOVERED: 8, ECANCEL: 9 };
 
 main().catch(err => {
   if (process.argv.includes('--json')) {

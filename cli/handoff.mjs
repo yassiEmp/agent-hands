@@ -9,11 +9,19 @@
 // Reads only. No input event is sent while the human types, so nothing here
 // can collide with their keystrokes or show up in the site's timing.
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { sleep } from './motion.mjs';
 import { urlLooksLikeLogin } from './guard.mjs';
-import { holds } from './wait.mjs';
+import { holds, conditionFrom } from './wait.mjs';
+import { CDP, DaemonCDP } from './cdp.mjs';
+import { STATE_DIR, recall as recallTab, remember as rememberTab } from './tab.mjs';
+import { BOX, clickAt } from './gestures.mjs';
+import { summon } from './summon.mjs';
 
 export const DEFAULT_HANDOFF_S = 600;
+// --wait returns inside a 10 min agent shell limit, with margin. Call it again to keep waiting.
+export const DEFAULT_WAIT_S = 540;
 const POLL_MS = 700;
 // Redirect chains pass through pages that look signed in for a moment, e.g.
 // an OAuth callback that renders before it bounces. Require the state to hold.
@@ -141,9 +149,11 @@ export async function waitDetached(cdp, targetId, { condition = null, timeoutMs,
   while (Date.now() - start < timeoutMs) {
     const t = await tabInfo(cdp, targetId);
     if (!t) {
+      // The human closing the tab is their answer: they will not sign in now.
       if (++missing >= 3) {
         throw Object.assign(new Error(
-          'the sign-in tab was closed.\n' + `  last page: ${last?.url ?? '(none)'}`), { code: 'EHANDOFF' });
+          'the user closed the sign-in tab. Ask them before handing off again.\n' +
+          `  last page: ${last?.url ?? '(none)'}`), { code: 'ECANCEL' });
       }
     } else {
       missing = 0; last = t;
@@ -165,4 +175,176 @@ export async function waitDetached(cdp, targetId, { condition = null, timeoutMs,
     await sleep(POLL_MS);
   }
   return { ok: false, waitedMs: Date.now() - start, url: last?.url, title: last?.title };
+}
+
+// ------------------------------------------------------------- launched ----
+//
+// A browser started by `launch` is reached with one socket per page, and that
+// socket is an attached client on the tab. The same port also serves a
+// browser-level socket with no prompt. Waiting through it leaves the sign-in
+// tab with nothing attached, as on the relay route.
+async function browserSocket(port) {
+  const r = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(3000) });
+  const { webSocketDebuggerUrl } = await r.json();
+  return CDP.open(webSocketDebuggerUrl);
+}
+
+// The socket handoff watches through. The relay socket already is one. For a
+// launched browser the page socket closes here, after any --here navigation.
+export async function handoffSocket(cdp, url, { flags }) {
+  if (cdp instanceof DaemonCDP) return cdp;
+  if (url && flags.here) await cdp.send('Page.navigate', { url });
+  const watcher = await browserSocket(cdp.port);
+  Object.assign(watcher, { key: cdp.key, targetId: cdp.targetId, url: cdp.url, external: cdp.external });
+  cdp.close();
+  return watcher;
+}
+
+// -------------------------------------------------------------- passkey ----
+//
+// The agent clicks the passkey button; the human only confirms with Windows
+// Hello, a security key or a phone. A CDP click is a user gesture, which
+// WebAuthn requires. The WebAuthn CDP domain is never touched: it swaps the
+// user's real authenticators for virtual ones, and a page can tell.
+const PASSKEY_RX = 'passkey|pass key|clé d.accès|cle d.acces|security key|clé de sécurité|windows hello|hauptschlüssel|clave de acceso';
+
+// label: the button text on a site the default list misses, matched as a substring.
+const FIND_PASSKEY = label => `(() => {
+  const want = ${JSON.stringify(label ? label.toLowerCase() : null)};
+  const rx = new RegExp(${JSON.stringify(PASSKEY_RX)}, 'i');
+  const hit = s => want ? s.toLowerCase().includes(want) : rx.test(s);
+  const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  return [...document.querySelectorAll('button, a, [role=button], [role=link], input[type=submit]')]
+    .find(el => vis(el) && hit(el.innerText || el.value || el.getAttribute('aria-label') || '')) || null;
+})()`;
+
+// Attach, click, detach. Returns the button text, or null when none is shown.
+export async function clickPasskey(cdp, targetId, { label = null, speed = 1 } = {}) {
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true }, null);
+  cdp.sessionId = sessionId;
+  try {
+    for (let i = 0; i < 20; i++) {          // the sign-in form may still be mounting
+      const box = await cdp.evaluate(`${BOX}(${FIND_PASSKEY(label)})`).catch(() => null);
+      if (box) {
+        const name = await cdp.evaluate(`(${FIND_PASSKEY(label)})?.innerText?.trim().slice(0, 60) ?? ''`).catch(() => '');
+        await clickAt(cdp, cdp.key, box, box.w, speed);
+        await cdp.evaluate('0').catch(() => {});      // flush the release before detaching
+        return name || 'passkey';
+      }
+      await sleep(500);
+    }
+    return null;
+  } finally {
+    cdp.sessionId = null;
+    await cdp.send('Target.detachFromTarget', { sessionId }, null).catch(() => {});
+  }
+}
+
+// -------------------------------------------------------------- pending ----
+//
+// `handoff --start` returns at once so the agent's shell never sits on a
+// 10 minute wait. The tab to watch is written here, and `handoff --wait`
+// picks it up, as many times as it takes.
+const pendingFile = key => path.join(STATE_DIR, `${key}.handoff.json`);
+
+export function savePending(key, p) {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(pendingFile(key), JSON.stringify({ ...p, at: Date.now() }));
+}
+
+export function loadPending(key) {
+  try { return JSON.parse(fs.readFileSync(pendingFile(key), 'utf8')); } catch { return null; }
+}
+
+export function clearPending(key) {
+  try { fs.unlinkSync(pendingFile(key)); } catch { /* nothing pending */ }
+}
+
+// ---------------------------------------------------------------- verb ----
+
+const hostOf = u => { try { return new URL(u).host; } catch { return 'the site'; } };
+const short = t => (t || '').slice(0, 60);
+
+// The whole verb: prepare the tab, call the human, optionally press the
+// passkey button, then wait (or return at once with --start).
+export async function runHandoff(cdp, url, args) {
+  const f = args.flags;
+  const say = m => { if (!args.quiet) console.error(m); };
+
+  let pending = null;
+  if (f.wait) {
+    pending = loadPending(cdp.key);
+    if (!pending) {
+      throw Object.assign(new Error('no handoff is pending for this browser.\n' +
+        '  Start one: agent-hands handoff <url> --start'), { code: 'EUSAGE' });
+    }
+  } else {
+    const before = recallTab(cdp.key);
+    // A launched browser already navigated for --here in handoffSocket.
+    const nav = f.here && !(cdp instanceof DaemonCDP) ? undefined : url;
+    const targetId = await prepareDetached(cdp, { url: nav, here: f.here });
+    rememberTab(cdp.key, { targetId, title: '', url: url ?? cdp.url });
+    pending = {
+      targetId,
+      site: hostOf(url ?? cdp.url),
+      condition: f.url || f.text ? conditionFrom(args, []) : null,
+      previousTab: before && before.targetId !== targetId
+        ? { targetId: before.targetId, title: before.title, url: before.url } : null,
+    };
+
+    // The raise must land before a passkey click: Windows Hello draws its
+    // prompt over the focused window, and a background one leaves it hidden.
+    const called = summon(cdp, { message: `Sign in to ${pending.site}. The agent continues when you are in.` });
+    if (f.passkey) {
+      pending.summon = await called;
+      pending.passkey = await clickPasskey(cdp, targetId, { label: f.passkeyLabel, speed: args.speed });
+      say(pending.passkey
+        ? `  pressed "${pending.passkey}". The user confirms with Windows Hello, a key or a phone.`
+        : '  no passkey button on the page. The user picks the sign-in method.');
+    }
+    if (f.start) {
+      pending.summon ??= await called;
+      savePending(cdp.key, pending);
+      return {
+        data: { state: 'waiting', site: pending.site, passkey: pending.passkey ?? null,
+                summon: pending.summon, previousTab: pending.previousTab },
+        human: `… waiting for the user to sign in to ${pending.site}.\n` +
+          '  Tell them: "Sign in in the window I brought up. I continue by myself when you are in."\n' +
+          '  Then: agent-hands handoff --wait',
+      };
+    }
+    pending.called = called;
+  }
+
+  const timeoutS = f.timeout ?? (f.wait ? DEFAULT_WAIT_S : DEFAULT_HANDOFF_S);
+  const onTick = ms => { if (ms >= 60000 && ms % 60000 < 700) say(`  still waiting (${Math.round(ms / 60000)} min)`); };
+  say(`  waiting up to ${timeoutS}s for the user to sign in to ${pending.site} (nothing attached)…`);
+
+  let r;
+  try {
+    r = await waitDetached(cdp, pending.targetId, { condition: pending.condition, timeoutMs: timeoutS * 1000, onTick });
+  } catch (e) {
+    if (e.code === 'ECANCEL') clearPending(cdp.key);
+    throw e;
+  } finally {
+    // The summon child holds the event loop until it exits; never leave it behind.
+    if (pending.called) pending.summon = await pending.called;
+  }
+
+  if (!r.ok) {
+    const { called, ...keep } = pending;
+    savePending(cdp.key, keep);
+    throw Object.assign(new Error(
+      `no sign-in after ${timeoutS}s.\n  page now: "${short(r.title)}" ${r.url}\n` +
+      '  The tab is still waiting. Keep waiting: agent-hands handoff --wait'), { code: 'EWAIT' });
+  }
+  clearPending(cdp.key);
+  const state = r.already ? 'already-signed-in' : 'signed-in';
+  const back = pending.previousTab;
+  return {
+    data: { state, url: r.url, title: r.title, waitedMs: r.waitedMs, previousTab: back,
+            summon: pending.summon ?? null },
+    human: `✓ ${state} — "${short(r.title)}" ${r.url}  (${(r.waitedMs / 1000).toFixed(0)}s)` +
+      (back ? `\n  commands now go to this tab. Your earlier tab: --tab "${short(back.title || back.url)}"` : ''),
+  };
 }
