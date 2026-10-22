@@ -166,24 +166,39 @@ export async function capture(cdp, { max = 300 } = {}) {
 
 // Numbers survive a new snapshot of the same tab, so @e12 still names the
 // Create button after a click opens a section above it. An element keeps its
-// number when it has the same node id, else the same tag, name and path. A
-// number that leaves the page is never given to another element, so an old
-// ref names its element or nothing. A new document (no node id carried over)
-// starts again at @e1.
-const shapeOf = e => JSON.stringify([e.frame?.targetId ?? '', e.tag, e.ident ?? e.name, e.path ?? null]);
+// number when it has the same node id, else when its tag and name are unique
+// on both snapshots. A number is never given to another element in the same
+// tab, even after a navigation, so an old ref names its element or nothing.
+// Only a new tab starts again at @e1.
+//
+// Position is no evidence. A list of "Delete" buttons re-rendered after a row
+// is removed puts row 4's button at row 3's path.
+const shapeOf = e => JSON.stringify([e.frame?.targetId ?? '', e.tag, e.ident ?? e.name ?? '']);
 const nodeKey = e => (e.frame?.targetId ?? '') + ':' + e.node;
 
+// Shapes that occur once in `list`, mapped to their ref (or index).
+function uniqueShapes(list) {
+  const seen = new Map();
+  for (const [r, e] of list) {
+    if (!(e.ident ?? e.name)) continue;
+    const s = shapeOf(e);
+    seen.set(s, seen.has(s) ? null : r);
+  }
+  return seen;
+}
+
 function number(nodes, prev, targetId) {
-  const old = prev && prev.targetId === targetId && prev.refs ? Object.entries(prev.refs) : [];
-  const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e), r]));
+  const same = targetId && prev?.targetId === targetId && prev.refs;
+  const old = same ? Object.entries(prev.refs) : [];
   const refs = {};
-  if (!nodes.some(n => n.node && byNode.has(nodeKey(n)))) {
+  if (!same) {
     nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
     return { refs, next: nodes.length + 1 };
   }
+  const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e), r]));
   // Two passes: a node-id match must win over a shape match lower down.
-  const shapes = new Map();
-  for (const [r, e] of old) shapes.set(shapeOf(e), shapes.has(shapeOf(e)) ? null : r);
+  const shapes = uniqueShapes(old);
+  const fresh = uniqueShapes(nodes.map((n, i) => [i, n]));
   const taken = new Set();
   const ids = nodes.map(n => {
     const r = n.node && byNode.get(nodeKey(n));
@@ -191,7 +206,7 @@ function number(nodes, prev, targetId) {
     return null;
   });
   nodes.forEach((n, i) => {
-    if (ids[i]) return;
+    if (ids[i] || fresh.get(shapeOf(n)) !== i) return;
     const r = shapes.get(shapeOf(n));
     if (r && !taken.has(r)) { taken.add(r); ids[i] = r; }
   });
@@ -284,7 +299,13 @@ export function render(snap) {
 // are both positions. When a form inserts a section, the path lands on the
 // next button along, so a match also needs the same name. Measured on the
 // Cloudflare R2 token form: Create resolved to Cancel and was clicked.
-const FIND = e => `(() => {
+//
+// A ref with a node id reaches here only when that node is gone. Its old
+// position then holds a lookalike at best: a non-keyed list re-render put
+// row 4's Delete at row 3's path. So only a unique name is accepted.
+// `positional` keeps the position steps for choosing what to scroll, where a
+// lookalike in the same container is harmless.
+const FIND = (e, { positional = !e.node } = {}) => `(() => {
   const nameOf = ${NAME_OF};
   const identOf = ${IDENT_OF};
   const tag = ${JSON.stringify(e.tag)}, ident = ${JSON.stringify(e.ident ?? null)};
@@ -298,8 +319,8 @@ const FIND = e => `(() => {
   };
   const ok = el => el && el.tagName && el.tagName.toLowerCase() === tag
     && (ident === null || identOf(el) === ident);
-  let el = walk(${JSON.stringify(e.path)});
-  if (!ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
+  let el = ${positional} ? walk(${JSON.stringify(e.path)}) : null;
+  if (${positional} && !ok(el)) el = document.querySelector(${JSON.stringify(e.sel)});
   if (!ok(el) && ident) {
     const named = [...document.querySelectorAll(tag)].filter(ok);
     el = named.length === 1 ? named[0] : null;
@@ -321,13 +342,16 @@ const RELOCATE = e => `(() => {
 
 // The stored node itself, when it is still in the page and still the same
 // element. A framework may reuse a node for other content, so the name is
-// checked here too.
+// checked here too. A live node under another name is CHANGED: the search by
+// position would then find a lookalike, so the click is refused.
+const CHANGED = 'changed';
 const CHECKED = e => `function () {
   const nameOf = ${NAME_OF};
   const identOf = ${IDENT_OF};
   const ident = ${JSON.stringify(e.ident ?? null)};
-  if (!this.isConnected || this.tagName.toLowerCase() !== ${JSON.stringify(e.tag)}) return null;
-  if (ident !== null && identOf(this) !== ident) return null;
+  if (!this.isConnected) return null;
+  if (this.tagName.toLowerCase() !== ${JSON.stringify(e.tag)}) return '${CHANGED}';
+  if (ident !== null && identOf(this) !== ident) return '${CHANGED}';
   return (${MEASURE}).call(this);
 }`;
 
@@ -367,7 +391,7 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
   if (box.y < 0 || box.y > box.vh) {
-    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e);
+    const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e, { positional: true });
     await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed, { near });
     box = await read(cdp, e) || box;
   }
@@ -393,6 +417,7 @@ async function rootFrameOwner(cdp, frame) {
 // The stored node first, then path, selector and name.
 async function measure(cdp, e, session) {
   const byNode = e.node ? await callOnNode(cdp, e.node, CHECKED(e), session) : null;
+  if (byNode === CHANGED) return null;
   return byNode ?? await evaluateIn(cdp, session, RELOCATE(e));
 }
 

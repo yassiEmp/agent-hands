@@ -237,6 +237,39 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — stable refs: node ids and numbers that survive
+
+Follow-up to the name check in 0.19.2. Each ref stores the browser's
+backendNodeId (`cli/nodeids.mjs`). The page cannot see it, and it survives
+the page moving the element. Click time tries that node first.
+- A live node under another name is refused.
+- A gone node falls back to the one element with that tag and name. Its old
+  position is never trusted: a non-keyed list re-render put row 4's Delete
+  at row 3's path, and the first version clicked it.
+
+Numbering: a new snapshot of the same tab keeps the number of each element
+with the same node id, else with a tag and name unique on both snapshots.
+`next` is stored, so a tab never gives a number to another element, even
+after a navigation. Only a new tab starts at @e1. The error-path snapshot in
+`batch` is now complete (it printed and saved 40 refs, which dropped every
+held ref above @e40).
+
+Cost: 160-180 ms per 300 refs, direct and through the relay (walk alone
+6-12 ms). Reviewed by a separate agent; its fixes are in. Known limits:
+- Two agents snapshotting one browser at once can collide on `next`.
+- An element that leaves and comes back with a duplicate name gets a new
+  number.
+- A connected `display:none` node measures as (0,0).
+
+Scenarios passed on a local page and a cross-origin frame: section added
+and removed, node re-rendered, full form re-rendered, row removed from a
+non-keyed list (held ref refuses), live node renamed (refuses), field filled
+twice, frame moved, reload.
+
+Separate bug found while testing, not fixed: a ref inside a frame whose own
+content scrolls stays offscreen. agent-hands scrolls only the outer page,
+then clicks outside the viewport and reports success with 0 points.
+
 ## Unreleased (22 Oct 2026) — a ref clicked the wrong button after the page changed
 
 Reported by an agent creating a Cloudflare R2 token: its click on the

@@ -143,7 +143,7 @@ YOUR OWN BROWSER
   \`agent-hands snapshot\` works here and mints its own refs, stored per browser,
   so --ref works on your own browser too. Refs are bound to the tab they came
   from. A ref keeps its number while its element stays on the page, and a
-  ref whose element left refuses to click. A new page starts again at @e1.
+  ref whose element left refuses to click. A tab never reuses a number.
   Re-snapshot to see what a click added.
 
 STATE  (stop retyping the target)
@@ -1466,11 +1466,13 @@ const endpoint = { ...resolution.endpoint,
         worst = Math.max(worst, EXIT[e.code] ?? 1);
         // The page at the moment of failure, so the fix can be planned without
         // another look. Saved too, so --ref works on the very next command.
+        // Captured in full and printed short: a 40-ref file would drop every
+        // ref the agent holds above @e40.
         if (e.code !== 'ELOGINPAGE') {
           try {
-            const snap = await capture(cdp, { max: 40 });
+            const snap = await capture(cdp);
             save(cdp.key, snap);
-            out.page = { title: snap.title, url: snap.url, refs: slimRefs(snap) };
+            out.page = { title: snap.title, url: snap.url, refs: slimRefs(snap).slice(0, 40) };
           } catch { /* a page that cannot be read still reports the error */ }
         }
         // A sign-in block is not a per-line failure: every remaining line would

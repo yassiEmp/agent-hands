@@ -539,7 +539,7 @@ a click that did nothing on a page with no cover.
 4. **Re-snapshot after the page changes, to see what it added.** A ref keeps
    its number while its element stays on the page, so `@e12` is still the same
    button after a section opens above it. A ref whose element left fails with
-   exit 2. A new page starts again at `@e1`.
+   exit 2, and a tab never gives its number to another element.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to
    be. Roughly one page action every 2 to 3 seconds.
 
