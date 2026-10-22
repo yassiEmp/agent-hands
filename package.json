@@ -1,6 +1,6 @@
 {
   "name": "agent-hands",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Let your AI agent work in your real, signed-in Chrome or Edge, in the background while you keep working. Human-like clicks and typing, sign-in and passkey handoff to you. A CLI plus a Claude Code skill.",
   "type": "module",
   "scripts": {
