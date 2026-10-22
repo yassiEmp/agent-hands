@@ -261,10 +261,14 @@ capture recorded the owner's own browser instead of the throwaway one.
 6. Popups need no special code. The watched tab stays open while a "Sign in
    with Google" popup runs, and it redirects after the popup closes.
 
-Not measured: Google sign-in with a real account, in the owner's Edge and in
-a launched Edge. A dummy address only reaches "account not found". Build the
-clean relaunch (browser restarted without debugging flags for the sign-in)
-only if Google blocks the launched Edge.
+Measured 22 Oct 2026: the owner signed in to Google with a real account in a
+launched Edge (fresh profile `gtest2`, `--remote-debugging-port`,
+`AutomationControlled` off). No "browser may not be secure" block. `--wait`
+returned `signed-in` on myaccount.google.com after 25 s. So the clean relaunch
+is not built. Not yet run on the owner's own Edge through the relay.
+
+Open: on a fresh profile the raised window title read "Paramètres et 2 pages
+de plus", so Edge's welcome tab may sit in front of the sign-in tab.
 
 ## Unreleased (4 Oct 2026) — `handoff`, the human signs in for the agent
 
