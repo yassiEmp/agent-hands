@@ -9,8 +9,8 @@
 // the relay (daemon.mjs). One Runtime.evaluate returns role, name and rect
 // together, and enables no domain, so it emits no event flood at a concurrent
 // client — the daemon broadcasts events to every client, with no filtering.
-// One DOM.describeNode per ref then adds the browser's node id (nodeids.mjs):
-// 160-180 ms for 300 refs, direct or through the relay, measured 22 Oct 2026.
+// One DOM.describeNode per ref that needs it then adds the browser's node id
+// (nodeids.mjs, needIds below).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -140,11 +140,29 @@ const WALK = (interactive, structural, max) => `(() => {
   return [json, ...ordered];
 })()`;
 
-// One walk, then the browser's node id for each element. A browser that
-// refuses the ids still gets a snapshot, resolved by path and name alone.
+// Which elements get a node id. A unique name already finds its element
+// again after a move, so only duplicate and unnamed elements need one, on
+// screen first, at most ID_CAP. Each id is one call, and a hidden tab answers
+// slowly: ids for all 300 refs took a Wikipedia snapshot from 0.45 s to
+// 1.34 s (median of 30, tab hidden); 71 of those 300 needed one.
+const ID_CAP = 80;
+function needIds(json) {
+  const nodes = JSON.parse(json).nodes;
+  const key = n => n.tag + '|' + (n.ident ?? n.name ?? '');
+  const count = new Map();
+  for (const n of nodes) count.set(key(n), (count.get(key(n)) || 0) + 1);
+  return nodes.map((n, i) => [n, i])
+    .filter(([n]) => !(n.ident ?? n.name) || count.get(key(n)) > 1)
+    .sort(([a], [b]) => a.off - b.off)
+    .slice(0, ID_CAP).map(([, i]) => i);
+}
+
+// One walk, then the browser's node id for the elements that need one. A
+// browser that refuses the ids still gets a snapshot, resolved by path and
+// name alone.
 async function walkIn(cdp, walk, session) {
   try {
-    const { json, ids } = await evaluateWithIds(cdp, walk, session);
+    const { json, ids } = await evaluateWithIds(cdp, walk, session, needIds);
     const data = JSON.parse(json);
     data.nodes.forEach((n, i) => { if (ids[i]) n.node = ids[i]; });
     return data;

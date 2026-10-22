@@ -14,8 +14,9 @@ const release = (cdp, session, objectGroup) =>
   cdp.send('Runtime.releaseObjectGroup', { objectGroup }, session).catch(() => {});
 
 // `expression` evaluates to [json, el1, el2, ...]. Returns the json and one
-// backendNodeId (or null) per element, in order.
-export async function evaluateWithIds(cdp, expression, session) {
+// backendNodeId (or null) per element, in order. `pick(json)` names the
+// indexes worth an id; the others get null and cost no call.
+export async function evaluateWithIds(cdp, expression, session, pick = null) {
   const objectGroup = group();
   try {
     const { result, exceptionDetails } = await cdp.send('Runtime.evaluate',
@@ -25,7 +26,9 @@ export async function evaluateWithIds(cdp, expression, session) {
       { objectId: result.objectId, ownProperties: true, objectGroup }, session);
     const items = props.filter(p => /^\d+$/.test(p.name)).sort((a, b) => a.name - b.name);
     const json = items[0]?.value?.value;
-    const ids = await Promise.all(items.slice(1).map(p =>
+    const els = items.slice(1);
+    const want = new Set(pick ? pick(json) : els.keys());
+    const ids = await Promise.all(els.map((p, i) => !want.has(i) ? null :
       cdp.send('DOM.describeNode', { objectId: p.value.objectId, depth: 0 }, session)
         .then(r => r.node.backendNodeId, () => null)));
     return { json, ids };

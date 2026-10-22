@@ -258,6 +258,18 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session, axi
   const dir = Math.sign(deltaY);
   const total = Math.abs(deltaY);
   let done = 0;
+  // The scroller is found once and held as a remote object, which the page
+  // cannot see. Finding it on every frame sent the whole element search ~400
+  // times per long scroll; a hidden tab ran them slowly and the final read
+  // waited for all of them: +1.5 to 2.5 s on a far Wikipedia ref.
+  const group = `agent-hands-scroll-${process.pid}-${t0}`;
+  const held = await cdp.send('Runtime.evaluate',
+    { expression: `${SCROLLER(axis)}(${near})`, objectGroup: group }, session).catch(() => null);
+  const objectId = held?.result?.objectId;
+  const step = d => objectId
+    ? cdp.fire('Runtime.callFunctionOn', { objectId, functionDeclaration: 'function (x, y) { this.scrollBy(x, y); }',
+        arguments: [{ value: sideways ? d : 0 }, { value: sideways ? 0 : d }] }, session)
+    : cdp.fire('Runtime.evaluate', { expression: `${SCROLLER(axis)}(${near}).scrollBy(${sideways ? d : 0},${sideways ? 0 : d})` }, session);
 
   while (done < total) {
     const notch = Math.min(total - done, rand(90, 190));
@@ -266,17 +278,19 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session, axi
     for (let i = 1; i <= frames; i++) {
       const eased = 1 - Math.pow(1 - i / frames, 3);
       const at = notch * eased;
-      const d = dir * (at - prev);
-      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER(axis)}(${near}).scrollBy(${sideways ? d : 0},${sideways ? 0 : d})` }, session);
+      step(dir * (at - prev));
       prev = at;
       await sleep(16);
     }
     done += notch;
     await sleep(rand(70, 260) / speed); // pause between bursts
   }
-  const { result } = await cdp.send('Runtime.evaluate', { returnByValue: true,
-    expression: sideways ? `(s => Math.round(s === window ? scrollX : s.scrollLeft))(${SCROLLER(axis)}(${near}))`
-      : `(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER(axis)}(${near}))` }, session);
+  const read = sideways ? 'Math.round(s === window ? scrollX : s.scrollLeft)' : 'Math.round(s === window ? scrollY : s.scrollTop)';
+  const { result } = objectId
+    ? await cdp.send('Runtime.callFunctionOn', { objectId, returnByValue: true,
+        functionDeclaration: `function () { const s = this; return ${read}; }` }, session)
+    : await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `(s => ${read})(${SCROLLER(axis)}(${near}))` }, session);
+  if (objectId) cdp.send('Runtime.releaseObjectGroup', { objectGroup: group }, session).catch(() => {});
   const y = result?.value;
   return { pixels: deltaY, ms: Date.now() - t0, y };
 }

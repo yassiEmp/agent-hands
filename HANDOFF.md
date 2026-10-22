@@ -237,6 +237,32 @@ section 9, for every link. The evidence page was measured with
 `docs/assets/screencast.mjs`, never from the screen, after a screen-region
 capture recorded the owner's own browser instead of the throwaway one.
 
+## Unreleased (22 Oct 2026) — speed: node ids only where a name is not enough
+
+Measured on Wikipedia "List of sovereign states" (300 refs), tab hidden
+(the window was covered, as when an agent works while the user does
+something else). In-process, so the CLI start-up (~0.9 s) is excluded.
+Medians, old and new interleaved:
+
+| | 0.19.1 | 0.20.1 | now |
+|---|---|---|---|
+| snapshot | 0.34-0.45 s | 1.34 s | 0.57 s |
+| locate, visible ref | 5 ms | 10 ms | 15-20 ms |
+| locate, far offscreen ref | 6.7-9.1 s | 7.9-9.6 s | 8.3-9.0 s |
+
+- The snapshot cost was one DOM.describeNode per ref, and a hidden tab
+  answers each slowly. Visible, the same 300 calls cost 0.17 s. Now only
+  duplicate and unnamed refs get an id (71 of 300 here), on screen first, at
+  most 80. A unique name already finds its element again. Limit: a
+  duplicate-name ref past the cap falls back to path and name.
+- The scroll sent the whole element search on every animation frame (~400
+  per long scroll). It now finds the scroller once and holds it as a remote
+  object, which the page cannot see.
+- Both versions show rare stalls of 20-28 s on the hidden tab. Those come
+  from the browser, not from this code.
+- DOMSnapshot.captureSnapshot (one call for all ids) was measured and
+  rejected: 0.85 s and 2.4 MB per call on this page.
+
 ## Unreleased (22 Oct 2026) — stable refs: node ids and numbers that survive
 
 Follow-up to the name check in 0.19.2. Each ref stores the browser's
