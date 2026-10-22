@@ -142,8 +142,9 @@ YOUR OWN BROWSER
 
   \`agent-hands snapshot\` works here and mints its own refs, stored per browser,
   so --ref works on your own browser too. Refs are bound to the tab they came
-  from: navigate or switch tab and a stale ref refuses to click rather than
-  hitting the wrong element. Re-snapshot after anything that changes the page.
+  from. A ref keeps its number while its element stays on the page, and a
+  ref whose element left refuses to click. A new page starts again at @e1.
+  Re-snapshot to see what a click added.
 
 STATE  (stop retyping the target)
   Pin a browser once and later commands need no target flag.
@@ -307,7 +308,7 @@ NOTES
   Inside an iframe, --text and CSS selectors fail: page JS cannot cross the
   boundary. Use --ref from \`agent-hands snapshot\`, which works on any browser
   this CLI can reach. --ref scrolls the element into view first.
-  Refs go stale on every page change. Re-snapshot before reusing one.
+  A ref keeps its number while its element stays on the page. Re-snapshot to see new ones.
   Google sign-in refuses any CDP-driven browser. That is a browser check, not
   a behaviour check, so this tool cannot help. Sign in by hand in a Chrome
   launched without a debugging port; the session then works here.
@@ -988,7 +989,7 @@ async function loginViaCdp(args, cdp, speed, rest) {
     const e = entryOf(ref);
     if (!e) refuse([
       ref + ' is not in the current snapshot for this browser.',
-      '  Refs go stale on every page change. Re-read the page:',
+      '  Its element left the page, or the page is new. Re-read the page:',
       '    agent-hands snapshot',
     ]);
     const type = (e.type || '').toLowerCase();

@@ -90,10 +90,13 @@ export async function childFrames(cdp, { onFrame = null } = {}) {
 
 // Run an expression inside one frame. The session lives for this call only:
 // an attached session is the one thing a page could notice.
-export async function inFrame(cdp, targetId, expression) {
+export async function withFrame(cdp, targetId, fn) {
   const sid = await attach(cdp, targetId);
-  try { return await evaluateIn(cdp, sid, expression); } finally { await detach(cdp, sid); }
+  try { return await fn(sid); } finally { await detach(cdp, sid); }
 }
+
+export const inFrame = (cdp, targetId, expression) =>
+  withFrame(cdp, targetId, sid => evaluateIn(cdp, sid, expression));
 
 // Where a frame sits in the page now. The page may have scrolled since the
 // snapshot. A top-level frame costs two calls; only a nested one needs the search.

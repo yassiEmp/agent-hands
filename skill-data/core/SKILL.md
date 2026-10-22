@@ -536,7 +536,10 @@ a click that did nothing on a page with no cover.
    `<div>` COVERS its children, so clicking one focuses whichever input lies under
    that point. Aiming at a form ref used to type the identifier into the password
    box and report `tag:"FORM", replaced:true`. Target the input itself.
-4. **Re-snapshot after the page changes.** Old refs then point at nothing.
+4. **Re-snapshot after the page changes, to see what it added.** A ref keeps
+   its number while its element stays on the page, so `@e12` is still the same
+   button after a section opens above it. A ref whose element left fails with
+   exit 2. A new page starts again at `@e1`.
 5. **Pace multi-page runs.** The gesture is human; the sequence still needs to
    be. Roughly one page action every 2 to 3 seconds.
 

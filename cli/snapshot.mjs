@@ -9,12 +9,15 @@
 // the relay (daemon.mjs). One Runtime.evaluate returns role, name and rect
 // together, and enables no domain, so it emits no event flood at a concurrent
 // client — the daemon broadcasts events to every client, with no filtering.
+// One DOM.describeNode per ref then adds the browser's node id (nodeids.mjs):
+// 160-180 ms for 300 refs, direct or through the relay, measured 22 Oct 2026.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { scrollBy, refuseCovered } from './gestures.mjs';
-import { childFrames, inFrame, frameOffset, evaluateIn } from './frames.mjs';
+import { childFrames, withFrame, frameOffset, evaluateIn } from './frames.mjs';
+import { evaluateWithIds, callOnNode } from './nodeids.mjs';
 
 const STATE = path.join(os.homedir(), '.agent-browser', 'humanize');
 const refsFile = key => path.join(STATE, `${key}.refs.json`);
@@ -128,34 +131,84 @@ const WALK = (interactive, structural, max) => `(() => {
       path: pathOf(el), sel: selOf(el), ident: identOf(el),
     });
   }
-  return JSON.stringify({
+  const json = JSON.stringify({
     url: location.origin + location.pathname, title: document.title,
     vw, vh, sx: scrollX, sy: scrollY,
     truncated: keep.filter(el => useful.has(el)).length > ${max},
     nodes: out,
   });
+  return [json, ...ordered];
 })()`;
 
+// One walk, then the browser's node id for each element. A browser that
+// refuses the ids still gets a snapshot, resolved by path and name alone.
+async function walkIn(cdp, walk, session) {
+  try {
+    const { json, ids } = await evaluateWithIds(cdp, walk, session);
+    const data = JSON.parse(json);
+    data.nodes.forEach((n, i) => { if (ids[i]) n.node = ids[i]; });
+    return data;
+  } catch {
+    const raw = await cdp.send('Runtime.evaluate', { expression: walk + '[0]', returnByValue: true }, session);
+    return JSON.parse(raw.result.value);
+  }
+}
+
 export async function capture(cdp, { max = 300 } = {}) {
-  const raw = await cdp.evaluate(WALK(INTERACTIVE, STRUCTURAL, max));
-  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  const nodes = [...data.nodes, ...await frameNodes(cdp, data, max)];
-  const refs = {};
-  nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
+  const walk = WALK(INTERACTIVE, STRUCTURAL, max);
+  const data = await walkIn(cdp, walk, undefined);
+  const nodes = [...data.nodes, ...await frameNodes(cdp, data, walk)];
+  const { refs, next } = number(nodes, load(cdp.key), cdp.targetId ?? null);
   return { v: 1, key: cdp.key, targetId: cdp.targetId ?? null, url: data.url, title: data.title,
            viewport: { w: data.vw, h: data.vh }, scroll: { x: data.sx, y: data.sy },
-           truncated: data.truncated, refs };
+           truncated: data.truncated, next, refs };
+}
+
+// Numbers survive a new snapshot of the same tab, so @e12 still names the
+// Create button after a click opens a section above it. An element keeps its
+// number when it has the same node id, else the same tag, name and path. A
+// number that leaves the page is never given to another element, so an old
+// ref names its element or nothing. A new document (no node id carried over)
+// starts again at @e1.
+const shapeOf = e => JSON.stringify([e.frame?.targetId ?? '', e.tag, e.ident ?? e.name, e.path ?? null]);
+const nodeKey = e => (e.frame?.targetId ?? '') + ':' + e.node;
+
+function number(nodes, prev, targetId) {
+  const old = prev && prev.targetId === targetId && prev.refs ? Object.entries(prev.refs) : [];
+  const byNode = new Map(old.filter(([, e]) => e.node).map(([r, e]) => [nodeKey(e), r]));
+  const refs = {};
+  if (!nodes.some(n => n.node && byNode.has(nodeKey(n)))) {
+    nodes.forEach((n, i) => { refs['e' + (i + 1)] = n; });
+    return { refs, next: nodes.length + 1 };
+  }
+  // Two passes: a node-id match must win over a shape match lower down.
+  const shapes = new Map();
+  for (const [r, e] of old) shapes.set(shapeOf(e), shapes.has(shapeOf(e)) ? null : r);
+  const taken = new Set();
+  const ids = nodes.map(n => {
+    const r = n.node && byNode.get(nodeKey(n));
+    if (r && !taken.has(r)) { taken.add(r); return r; }
+    return null;
+  });
+  nodes.forEach((n, i) => {
+    if (ids[i]) return;
+    const r = shapes.get(shapeOf(n));
+    if (r && !taken.has(r)) { taken.add(r); ids[i] = r; }
+  });
+  // `next` outlives the refs that used it: a number from two snapshots ago
+  // must not come back.
+  let next = Math.max(prev.next || 0, ...old.map(([r]) => (Number(r.slice(1)) || 0) + 1));
+  nodes.forEach((n, i) => { refs[ids[i] ?? 'e' + next++] = n; });
+  return { refs, next };
 }
 
 // The fields inside cross-origin frames, in page coordinates. Each frame gets
 // one heading ref, so the agent sees where the fields live.
-async function frameNodes(cdp, top, max) {
-  const walk = WALK(INTERACTIVE, STRUCTURAL, max);
-  const frames = await childFrames(cdp, { onFrame: (f, sid) => evaluateIn(cdp, sid, walk) });
+async function frameNodes(cdp, top, walk) {
+  const frames = await childFrames(cdp, { onFrame: (f, sid) => walkIn(cdp, walk, sid) });
   const out = [];
   for (const f of frames) {
-    let data;
-    try { data = typeof f.result === 'string' ? JSON.parse(f.result) : f.result; } catch { continue; }
+    const data = f.result;
     if (!data?.nodes?.length) continue;
     const frame = { targetId: f.targetId, url: data.url, depth: f.depth };
     const off = (y, h) => y + h / 2 < 0 || y - h / 2 > top.vh;
@@ -263,7 +316,23 @@ const FRAME_AT = (ox, oy) => `[...document.querySelectorAll('iframe')].find(f =>
 
 const RELOCATE = e => `(() => {
   const el = ${FIND(e)};
-  if (!el) return null;
+  return el ? (${MEASURE}).call(el) : null;
+})()`;
+
+// The stored node itself, when it is still in the page and still the same
+// element. A framework may reuse a node for other content, so the name is
+// checked here too.
+const CHECKED = e => `function () {
+  const nameOf = ${NAME_OF};
+  const identOf = ${IDENT_OF};
+  const ident = ${JSON.stringify(e.ident ?? null)};
+  if (!this.isConnected || this.tagName.toLowerCase() !== ${JSON.stringify(e.tag)}) return null;
+  if (ident !== null && identOf(this) !== ident) return null;
+  return (${MEASURE}).call(this);
+}`;
+
+const MEASURE = `function () {
+  const el = this;
   const r = el.getBoundingClientRect();
   const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
   const top = document.elementFromPoint(cx, cy);
@@ -273,7 +342,7 @@ const RELOCATE = e => `(() => {
     + ((n.innerText || '').trim() ? ' "' + (n.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 40) + '"' : '');
   return JSON.stringify({ x: cx, y: cy, w: r.width, h: r.height, tag: el.tagName, vh: innerHeight,
                           coveredBy: covered ? label(top) : null });
-})()`;
+}`;
 
 export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   const snap = load(key);
@@ -287,13 +356,13 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
   const e = snap.refs[id];
   if (!e) {
     const n = Object.keys(snap.refs).length;
-    throw usage(`unknown ref "@${id}". The last snapshot has ${n ? `@e1 to @e${n}` : 'no refs'}.\n` +
-      `  Read it again: agent-hands snapshot${flagFor(cdp)}`);
+    throw usage(`unknown ref "@${id}": it is not in the last snapshot (${n} refs). ` +
+      `Its element left the page, or the page is new.\n  Read it again: agent-hands snapshot${flagFor(cdp)}`);
   }
 
   let box = await read(cdp, e);
   if (!box) throw usage(`@${id} ("${e.name || e.tag}") is no longer on the page, or the page changed around it.\n` +
-    `  Refs are numbered again on every snapshot. Re-run: agent-hands snapshot${flagFor(cdp)}`);
+    `  Re-run: agent-hands snapshot${flagFor(cdp)}`);
 
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
@@ -321,9 +390,15 @@ async function rootFrameOwner(cdp, frame) {
   return i >= 0 ? `document.querySelectorAll('iframe')[${i}]` : 'null';
 }
 
+// The stored node first, then path, selector and name.
+async function measure(cdp, e, session) {
+  const byNode = e.node ? await callOnNode(cdp, e.node, CHECKED(e), session) : null;
+  return byNode ?? await evaluateIn(cdp, session, RELOCATE(e));
+}
+
 async function read(cdp, e) {
   if (!e.frame) {
-    const raw = await cdp.evaluate(RELOCATE(e));
+    const raw = await measure(cdp, e, undefined);
     return raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
   }
   // Inside a frame: find where the frame sits now, then the element inside it.
@@ -332,7 +407,7 @@ async function read(cdp, e) {
   const vh = await cdp.evaluate('innerHeight');
   const frame = { targetId: f.targetId, ox: f.ox, oy: f.oy };
   if (e.frameBox) return { x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, tag: 'IFRAME', vh, frame };
-  const raw = await inFrame(cdp, f.targetId, RELOCATE(e)).catch(() => null);
+  const raw = await withFrame(cdp, f.targetId, sid => measure(cdp, e, sid)).catch(() => null);
   if (!raw) return null;
   const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
   return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame };
