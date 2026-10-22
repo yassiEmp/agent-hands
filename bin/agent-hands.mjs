@@ -17,6 +17,7 @@ import { staleness, banner, updateField, update, fetchLatest, cacheIsStale } fro
 import { tail } from '../cli/audit.mjs';
 import { capture, save, render, locate, load as loadSnapshot } from '../cli/snapshot.mjs';
 import { survey, render as renderBrowsers } from '../cli/browsers.mjs';
+import { defaultBrowser } from '../cli/identity.mjs';
 import { check as checkChallenge, render as renderChallenge, waitUntilCleared } from '../cli/challenge.mjs';
 import { load as loadConfig, save as saveConfig, clear as clearConfig, agentId, mintId,
          pinFrom, stamp, conflict } from '../cli/config.mjs';
@@ -1508,7 +1509,9 @@ async function main() {
 
   if (cmd === 'browsers') {
     const rows = await survey();
-    if (args.json) return console.log(JSON.stringify({ ok: true, command: 'browsers', browsers: rows }));
+    if (args.json) {
+      return console.log(JSON.stringify({ ok: true, command: 'browsers', default: defaultBrowser(), browsers: rows }));
+    }
     return console.log(renderBrowsers(rows));
   }
 

@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { browserNames, browserDir, profileDir, readPortFile, portAlive } from './cdp.mjs';
 import { hasAgentBrowser } from './env.mjs';
+import { defaultBrowser, profiles, UNDRIVABLE } from './identity.mjs';
 
 // Browsers this CLI started itself. Without these a browser the agent launched
 // a moment ago is absent from the list, and the summary line happily points at
@@ -66,6 +67,7 @@ export async function survey() {
     }
   }
 
+  const sys = defaultBrowser()?.name;
   for (const name of browserNames()) {
     const dir = browserDir(name);
     if (!dir || !fs.existsSync(dir)) continue;           // browser not installed
@@ -73,10 +75,12 @@ export async function survey() {
     const probe = found ? await probeEndpoint(found.port)
                         : { state: 'off', detail: 'remote debugging not enabled' };
     rows.push({ kind: 'external', name, dir, port: found?.port ?? null,
-                state: probe.state, detail: probe.detail, portFile: found?.file ?? null });
+                state: probe.state, detail: probe.detail, portFile: found?.file ?? null,
+                isDefault: name === sys, profiles: profiles(dir) });
   }
 
-  return rows;
+  // The user's main browser first: it is the one most likely to hold the login.
+  return rows.sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)));
 }
 
 const MARK = { running: '●', stale: '✗', dead: '✗', off: '○' };
@@ -98,15 +102,19 @@ export function render(rows) {
   out.push('BROWSERS');
   for (const r of rows) {
     const flag = flagFor(r);
-    out.push(`  ${MARK[r.state] ?? '?'} ${r.name.padEnd(w)}  ${String(r.port ?? '-').padEnd(6)}`
+    const name = r.isDefault ? `${r.name}*` : r.name;
+    out.push(`  ${MARK[r.state] ?? '?'} ${name.padEnd(w + 1)}  ${String(r.port ?? '-').padEnd(6)}`
       + `  ${r.detail}`.padEnd(38) + `  ${flag}`);
+    for (const p of r.profiles ?? []) out.push(profileLine(p, r.state === 'running'));
   }
+  out.push(...defaultNote(rows));
 
   out.push('');
   if (!live.length) {
     out.push('Nothing is reachable right now.');
     const off = rows.filter(r => r.kind === 'external' && r.state !== 'running');
     if (off.length) {
+      // off is sorted default-first, so the hint names the user's main browser.
       out.push(`  To use a browser you already have open, enable debugging in it:`);
       out.push(`    ${/edge/.test(off[0].name) ? 'edge' : 'chrome'}://inspect/#remote-debugging`
         + `  ->  "Allow remote debugging for this browser instance"`);
@@ -131,6 +139,8 @@ export function render(rows) {
   } else {
     out.push('More than one browser is reachable. ASK THE USER which one to drive —');
     out.push('logins live in a specific profile, and the wrong one silently looks logged out.');
+    const main = live.find(r => r.isDefault);
+    if (main) out.push(`  Propose ${main.name} first: it is the system default browser.`);
   }
 
   const stale = rows.filter(r => r.state === 'stale' || r.state === 'dead');
@@ -140,4 +150,24 @@ export function render(rows) {
     for (const r of stale) out.push(`  ${r.portFile}`);
   }
   return out.join('\n');
+}
+
+// "open" comes from last_active_profiles, which a closed browser keeps for
+// session restore. It only means "open now" while the browser runs.
+function profileLine(p, running) {
+  const tags = [p.lastUsed && 'last used', running && p.open && 'open'].filter(Boolean);
+  return (`      ${p.dir.padEnd(10)} ${p.name.padEnd(16)} ${(p.account ?? 'not signed in').padEnd(30)}`
+    + ` ${tags.join(', ')}`).trimEnd();
+}
+
+function defaultNote(rows) {
+  const sys = defaultBrowser();
+  if (!sys) return [];
+  if (rows.some(r => r.isDefault)) return ['  * system default browser'];
+  if (UNDRIVABLE.has(sys.name)) {
+    return [`  The system default browser is ${sys.name}. agent-hands drives Chromium only,`,
+      '  so the user\'s logins may live in a browser this tool cannot reach.'];
+  }
+  return [`  The system default browser (${sys.name ?? sys.handler}) is not in this list.`,
+    '  If it is a Chromium build, attach with --user-data-dir <path>.'];
 }

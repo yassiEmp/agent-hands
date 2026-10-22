@@ -104,10 +104,13 @@ function deadPin(pin, check, projectPath) {
 }
 
 function chooseOne(live) {
-  const list = live.map((r, i) => `  ${i + 1}  ${r.name.padEnd(12)} ${flagFor(r).padEnd(18)} ${r.detail}`);
+  const list = live.map((r, i) => `  ${i + 1}  ${(r.isDefault ? `${r.name}*` : r.name).padEnd(12)}`
+    + ` ${flagFor(r).padEnd(18)} ${r.detail}`);
+  const main = live.findIndex(r => r.isDefault);
   return [
     'several browsers are live and none is pinned.',
     ...list,
+    ...(main >= 0 ? [`  * system default browser. Propose it first: agent-hands use ${main + 1}`] : []),
     '',
     '  ASK THE USER which one to drive, then pin their answer:',
     '    agent-hands use <number>',

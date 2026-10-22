@@ -194,6 +194,11 @@ agent-hands use             # what is pinned, and which file holds it
 agent-hands use --clear     # drop it
 ```
 
+`browsers` marks the system default browser with `*` and lists it first. Under
+each browser it lists the profiles, the signed-in account, and the last-used
+profile. When you ask the user which browser to drive, propose the `*` one first.
+The account shown is the browser sign-in. It does not prove a login on a given site.
+
 The pin lives in `./.agent-hands/config.json`, found by walking up from the
 working directory. `--global` writes `~/.agent-hands/config.json`.
 
