@@ -72,7 +72,11 @@ export async function childFrames(cdp, { onFrame = null } = {}) {
       if (!b || claimed.has(t.targetId)) return;
       claimed.add(t.targetId);
       if (b.w < MIN_PX || b.h < MIN_PX) return;
-      mine.push({ targetId: t.targetId, url: t.url, ox: base.ox + b.ox, oy: base.oy + b.oy, w: b.w, h: b.h, depth });
+      // `parent`: the frame that holds this one, null for the page. A frame
+      // scrolled out of its parent's view sits outside the parent's box, so
+      // containment cannot name the parent.
+      mine.push({ targetId: t.targetId, url: t.url, ox: base.ox + b.ox, oy: base.oy + b.oy, w: b.w, h: b.h, depth,
+                  parent: base.targetId ?? null });
     });
     found.push(...mine);
     await Promise.all(mine.map(async f => {

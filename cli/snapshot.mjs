@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { scrollBy, refuseCovered } from './gestures.mjs';
+import { scrollBy, refuseCovered, SCROLLER } from './gestures.mjs';
 import { childFrames, withFrame, frameOffset, evaluateIn } from './frames.mjs';
 import { evaluateWithIds, callOnNode } from './nodeids.mjs';
 
@@ -367,7 +367,7 @@ const MEASURE = `function () {
   const label = n => n.tagName.toLowerCase() + (n.id ? '#' + n.id : '')
     + (typeof n.className === 'string' && n.className ? '.' + n.className.trim().split(/\\s+/).slice(0, 2).join('.') : '')
     + ((n.innerText || '').trim() ? ' "' + (n.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 40) + '"' : '');
-  return JSON.stringify({ x: cx, y: cy, w: r.width, h: r.height, tag: el.tagName, vh: innerHeight,
+  return JSON.stringify({ x: cx, y: cy, w: r.width, h: r.height, tag: el.tagName, vw: innerWidth, vh: innerHeight,
                           coveredBy: covered ? label(top) : null });
 }`;
 
@@ -393,50 +393,135 @@ export async function locate(cdp, key, ref, { speed = 1, force = false } = {}) {
 
   // Reach an offscreen element the way a human does. scrollIntoView jumps
   // instantly, which is precisely the signal this tool spends motion to avoid.
-  // A frame that scrolls its own document goes first: no page scroll brings
-  // an element below the frame's fold into view. Measured on example.com in a
-  // 600x300 frame: the page scrolled, the press landed outside the window,
-  // and the click reported success.
-  if (box.inner && outside(box.inner)) {
+  // Innermost document first: no outer scroll brings an element below a
+  // frame's own fold into view. Measured on example.com in a 600x300 frame:
+  // the page scrolled, the press landed outside the window, and the click
+  // reported success.
+  const depth = e.frame?.depth ?? 0;
+  if (box.inner) {
     const near = FIND(e, { positional: true });
-    await withFrame(cdp, box.frame.targetId, session =>
-      scrollBy(cdp, Math.round(box.inner.y - box.inner.vh / 2), speed, { near, session }));
+    await withFrame(cdp, box.frame.targetId, session => bring(cdp, box.inner, near, session, speed, { exact: true }));
     box = await read(cdp, e) || box;
   }
-  if (outside(box)) {
+  // The frames between the page and the ref's frame, innermost first. Each
+  // scrolls its own document to the <iframe> of the frame it holds.
+  if (box.frame && depth > 0) {
+    for (const { frame: p, child } of await chainOf(cdp, box.frame.targetId)) {
+      const view = viewIn(box, p);
+      if (!outside(view)) continue;
+      await withFrame(cdp, p.targetId, async session =>
+        bring(cdp, view, await iframeAt(cdp, session, child.ox - p.ox, child.oy - p.oy), session, speed));
+      box = await read(cdp, e) || box;
+    }
+  }
+  if (!box.frame || outside(box)) {
     const near = box.frame ? await rootFrameOwner(cdp, box.frame) : FIND(e, { positional: true });
-    await scrollBy(cdp, Math.round(box.y - box.vh / 2), speed, { near });
+    await bring(cdp, box, near, undefined, speed, { exact: !box.frame });
     box = await read(cdp, e) || box;
   }
-  refuseOutside(box, `@${id} ("${e.name || e.tag}")`);
-  refuseCovered(box, `@${id} ("${e.name || e.tag}")`, force);
+  const what = `@${id} ("${e.name || e.tag}")`;
+  await refuseOutside(cdp, box, depth, what);
+  refuseCovered(box, what, force);
   return { x: box.x, y: box.y, w: box.w, h: box.h, tag: box.tag, ...(box.frame && { frame: box.frame }) };
 }
 
-// A window that reports no height (minimised) cannot tell, so it never refuses.
-const outside = b => b.vh > 0 && (b.y < 0 || b.y > b.vh);
+// A view is a point and the window it must sit in: {x, y, vw, vh}. A window
+// that reports no size (minimised) cannot tell, so that axis never refuses.
+const offAxis = (v, axis) => axis === 'x'
+  ? v.vw > 0 && (v.x < 0 || v.x > v.vw)
+  : v.vh > 0 && (v.y < 0 || v.y > v.vh);
+const outside = v => offAxis(v, 'x') || offAxis(v, 'y');
 
-// A press outside the window reaches nothing, so it must not report success.
-function refuseOutside(box, what) {
-  if (!outside(box) && !(box.inner && outside(box.inner))) return;
-  throw Object.assign(new Error(`${what} is still out of view after scrolling.
-` +
-    `  A press there reaches nothing. Scroll its container, then snapshot again.`), { code: 'ECOVERED' });
+// How far `el` sits from the middle of what the scroller of `level` shows,
+// clipped to the window. Zero when it is already inside. A carousel 500 px
+// wide shows less than the window, so centring on the window left a button
+// past the carousel's edge.
+const OFFSET = (el, level, axis) => `((el, s) => {
+  if (!el) return null;
+  const x = ${axis === 'x'};
+  const e = el.getBoundingClientRect();
+  const win = x ? innerWidth : innerHeight;
+  let lo = 0, hi = win;
+  if (s !== window) {
+    const r = s.getBoundingClientRect();
+    lo = Math.max(0, x ? r.left : r.top); hi = Math.min(win, x ? r.right : r.bottom);
+  }
+  const mid = x ? e.left + e.width / 2 : e.top + e.height / 2;
+  return { d: mid >= lo && mid <= hi ? 0 : Math.round(mid - (lo + hi) / 2), win: s === window };
+})(${el}, ${SCROLLER(axis)}(${level}))`;
+
+// Each scroller from the nearest out to the window, at most four deep.
+// False when the page cannot find the element.
+async function bringExact(cdp, el, axis, session, speed) {
+  let level = el;
+  for (let k = 0; k < 4; k++) {
+    const o = await evaluateIn(cdp, session, OFFSET(el, level, axis));
+    if (!o) return k > 0;
+    if (o.d) await scrollBy(cdp, o.d, speed, { near: level, session, axis });
+    if (o.win) return true;
+    level = `${SCROLLER(axis)}(${level})`;
+  }
+  return true;
 }
 
-// A nested frame's own <iframe> lives inside another frame, so the page scrolls
-// the outermost frame that contains it.
+// Scroll one document until the point is in view on each axis it is off.
+// With `exact`, `near` is the element itself: each scroller from the nearest
+// out to the window moves just enough to show it. Otherwise `near` is an
+// <iframe> holding the point, and its scroller centres the point.
+async function bring(cdp, view, near, session, speed, { exact = false } = {}) {
+  for (const axis of ['y', 'x']) {
+    // Exact runs even inside the window: a container can clip the element.
+    // An element the page cannot find by position falls back to the view.
+    if (exact && await bringExact(cdp, near, axis, session, speed)) continue;
+    if (!offAxis(view, axis)) continue;
+    const d = axis === 'x' ? view.x - view.vw / 2 : view.y - view.vh / 2;
+    await scrollBy(cdp, Math.round(d), speed, { near, session, axis });
+  }
+}
+
+// The point as frame `f` sees it: f's box is its window.
+const viewIn = (box, f) => ({ x: box.x - f.ox, y: box.y - f.oy, vw: f.w, vh: f.h });
+
+// The frames that hold the ref's frame, innermost first, each with the frame
+// it holds. Excludes the ref's own frame and the page.
+async function chainOf(cdp, targetId) {
+  const byId = new Map((await childFrames(cdp)).map(f => [f.targetId, f]));
+  const out = [];
+  for (let c = byId.get(targetId); c?.parent && byId.has(c.parent); c = byId.get(c.parent)) {
+    out.push({ frame: byId.get(c.parent), child: c });
+  }
+  return out;
+}
+
+// A press outside any window on its way reaches nothing, so it must not
+// report success.
+async function refuseOutside(cdp, box, depth, what) {
+  let off = outside(box) || Boolean(box.inner && outside(box.inner));
+  if (!off && box.frame && depth > 0) {
+    off = (await chainOf(cdp, box.frame.targetId)).some(({ frame: p }) => outside(viewIn(box, p)));
+  }
+  if (!off) return;
+  throw Object.assign(new Error(`${what} is still out of view after scrolling.
+` +
+    `  A press there reaches nothing. Snapshot again; if it stays offscreen, its container does not scroll.`),
+    { code: 'ECOVERED' });
+}
+
+// The <iframe> whose content box starts at (ox, oy) in a document, as an
+// index. The frame moves while it scrolls, so a position match fails after
+// the first step; the index does not change.
+async function iframeAt(cdp, session, ox, oy) {
+  const i = await evaluateIn(cdp, session, `[...document.querySelectorAll('iframe')].indexOf(${FRAME_AT(ox, oy)})`);
+  return i >= 0 ? `document.querySelectorAll('iframe')[${i}]` : 'null';
+}
+
+// The page scrolls the outermost frame that holds the ref's frame.
 async function rootFrameOwner(cdp, frame) {
   const frames = await childFrames(cdp);
-  const f = frames.find(x => x.targetId === frame.targetId);
-  const root = f && f.depth > 0
-    ? frames.find(x => x.depth === 0 && f.ox >= x.ox && f.oy >= x.oy && f.ox < x.ox + x.w && f.oy < x.oy + x.h)
-    : f;
-  if (!root) return 'null';
-  // The frame moves while it scrolls, so a position match fails after the
-  // first step. Resolve it once to an index, which the scroll does not change.
-  const i = await cdp.evaluate(`[...document.querySelectorAll('iframe')].indexOf(${FRAME_AT(root.ox, root.oy)})`);
-  return i >= 0 ? `document.querySelectorAll('iframe')[${i}]` : 'null';
+  const byId = new Map(frames.map(f => [f.targetId, f]));
+  let root = byId.get(frame.targetId);
+  while (root?.parent && byId.has(root.parent)) root = byId.get(root.parent);
+  return root ? iframeAt(cdp, undefined, root.ox, root.oy) : 'null';
 }
 
 // The stored node first, then path, selector and name.
@@ -454,14 +539,14 @@ async function read(cdp, e) {
   // Inside a frame: find where the frame sits now, then the element inside it.
   const f = await frameOffset(cdp, e.frame.targetId, e.frame.depth ?? 1);
   if (!f) return null;
-  const vh = await cdp.evaluate('innerHeight');
+  const [vw, vh] = await cdp.evaluate('[innerWidth, innerHeight]');
   const frame = { targetId: f.targetId, ox: f.ox, oy: f.oy };
-  if (e.frameBox) return { x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, tag: 'IFRAME', vh, frame };
+  if (e.frameBox) return { x: f.ox + f.w / 2, y: f.oy + f.h / 2, w: f.w, h: f.h, tag: 'IFRAME', vw, vh, frame };
   const raw = await withFrame(cdp, f.targetId, sid => measure(cdp, e, sid)).catch(() => null);
   if (!raw) return null;
   const b = typeof raw === 'string' ? JSON.parse(raw) : raw;
   // `inner`: where the element sits in the frame's own window.
-  return { ...b, x: b.x + f.ox, y: b.y + f.oy, vh, frame, inner: { y: b.y, vh: b.vh } };
+  return { ...b, x: b.x + f.ox, y: b.y + f.oy, vw, vh, frame, inner: { x: b.x, y: b.y, vw: b.vw, vh: b.vh } };
 }
 
 // The flag that reaches this same browser again. The store key carries the

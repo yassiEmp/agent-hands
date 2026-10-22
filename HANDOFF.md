@@ -271,10 +271,24 @@ own content scrolls stayed offscreen. agent-hands scrolled only the outer
 page, then pressed outside the window and reported success. The frame's
 document now scrolls first, in the frame's session. Any ref still out of
 view after scrolling is refused with exit 8 (an element at top:-300px was
-"clicked" at y=-289 before). Not handled: a middle frame between the page
-and a nested frame that scrolls its own content. Also open: the check is
-vertical only, so a ref offscreen to the left or right still gets a press
-that reaches nothing.
+"clicked" at y=-289 before).
+
+Then fixed too (22 Oct 2026, after 0.20.0):
+- Nested frames. Each frame records its parent (`childFrames`), because a
+  frame scrolled out of its parent's view sits outside the parent's box.
+  `locate` scrolls the ref's frame, then every frame in between, innermost
+  first, then the page. The out-of-view check covers every window on the way.
+- Both axes. `scrollBy` takes `axis`, the check tests x and y.
+- Containers. An element ref scrolls each scroller from the nearest out to
+  the window just enough to show it. Centring on the window left a button
+  past the edge of a 500 px carousel. This runs on every ref click, even
+  inside the window, because a container can clip an element there.
+
+Measured on a local page (file:// > localhost frame > 127.0.0.1 frame, so
+both frames run out of process). 0.20.0 refused the nested button, and it
+pressed a carousel button at x=-478 and a page button at x=3024, reporting
+success both times. All three now click. Still open: `overflow:hidden`
+clipping. Such a box cannot scroll, and the covered check refuses the press.
 
 ## Unreleased (22 Oct 2026) — a ref clicked the wrong button after the page changed
 

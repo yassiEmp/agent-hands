@@ -237,10 +237,12 @@ export async function pressKey(cdp, name, speed) {
 // nothing there and a click aimed at an offscreen ref landed outside the
 // viewport. Measured on docs.stripe.com, 22 Oct 2026. Found again on every
 // step, so nothing is stored on the page.
-const SCROLLER = `(el => {
+// Per axis: carousels and wide tables scroll sideways.
+export const SCROLLER = (axis = 'y') => `(el => {
   for (let n = el && el.parentElement; n; n = n.parentElement) {
     const s = getComputedStyle(n);
-    if (/(auto|scroll|overlay)/.test(s.overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+    if (/(auto|scroll|overlay)/.test(s.overflow${axis.toUpperCase()})
+        && n.scroll${axis === 'x' ? 'Width' : 'Height'} > n.client${axis === 'x' ? 'Width' : 'Height'} + 1) return n;
   }
   return window;
 })`;
@@ -249,7 +251,9 @@ const CENTRE = 'document.elementFromPoint(innerWidth / 2, innerHeight / 2)';
 // near: a page expression for the element to bring into view. Without it, the
 // scroller under the middle of the viewport moves, which is what a wheel does.
 // session: scroll inside a frame's own document instead of the page.
-export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session } = {}) {
+// axis 'x' scrolls sideways; deltaY is then the horizontal distance.
+export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session, axis = 'y' } = {}) {
+  const sideways = axis === 'x';
   const t0 = Date.now();
   const dir = Math.sign(deltaY);
   const total = Math.abs(deltaY);
@@ -262,7 +266,8 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session } = 
     for (let i = 1; i <= frames; i++) {
       const eased = 1 - Math.pow(1 - i / frames, 3);
       const at = notch * eased;
-      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER}(${near}).scrollBy(0,${dir * (at - prev)})` }, session);
+      const d = dir * (at - prev);
+      cdp.fire('Runtime.evaluate', { expression: `${SCROLLER(axis)}(${near}).scrollBy(${sideways ? d : 0},${sideways ? 0 : d})` }, session);
       prev = at;
       await sleep(16);
     }
@@ -270,7 +275,8 @@ export async function scrollBy(cdp, deltaY, speed, { near = CENTRE, session } = 
     await sleep(rand(70, 260) / speed); // pause between bursts
   }
   const { result } = await cdp.send('Runtime.evaluate', { returnByValue: true,
-    expression: `(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER}(${near}))` }, session);
+    expression: sideways ? `(s => Math.round(s === window ? scrollX : s.scrollLeft))(${SCROLLER(axis)}(${near}))`
+      : `(s => Math.round(s === window ? scrollY : s.scrollTop))(${SCROLLER(axis)}(${near}))` }, session);
   const y = result?.value;
   return { pixels: deltaY, ms: Date.now() - t0, y };
 }
