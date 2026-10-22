@@ -1,12 +1,11 @@
 # agent-hands
 
-**Human-rate hands for a real Chromium browser.** One you launched, the one you
-are logged into, or an `agent-browser` session. It clicks, types and scrolls at
-human rates. One CDP socket, a whole gesture dispatched at 60-100Hz, Fitts-law
-motion with Bezier paths and lognormal keystroke timing.
+**Let your AI agent work in your real browser, the one you are already signed
+into, in the background while you keep working.**
 
-It never moves your physical cursor. It brings the window up only when it hands
-you a sign-in, and only once you stop typing.
+It clicks and types like a person, so sites do not flag your accounts. When it
+reaches a sign-in, it brings the window up for you and carries on by itself
+once you are in. It never asks for your password.
 
 ![agent-hands driving a throwaway Edge: snapshot, fill at human rate, press Enter, click the result](docs/assets/hero.gif)
 
@@ -15,11 +14,26 @@ every claim here, and the way to reproduce them, are in
 [docs/evidence.md](docs/evidence.md).
 
 ```bash
-agent-hands snapshot                         # find the element, get @e1 @e2
+npm i -g agent-hands
+agent-hands snapshot --browser edge              # what is on the page: @e1 @e2 ...
 agent-hands fill --ref @e2 "auto ecole vincennes"
 agent-hands press Enter
-agent-hands text h1                          # verify
+agent-hands handoff https://app.example.com/login --start   # you sign in; it continues
 ```
+
+What it does for an agent:
+
+- **Your browser, your logins.** It attaches to the Edge or Chrome you already
+  use. No new profile, no exported cookies.
+- **Background work.** It drives tabs you are not looking at. Your mouse
+  never moves and your screen stays yours.
+- **Sign-in handoff.** A toast and the window come up when you are needed,
+  after you stop typing. Passkeys work: the agent presses the button, you
+  touch the fingerprint reader.
+- **Input like a person.** Curved mouse paths at 60-100 Hz, human keystroke
+  timing, and long text pasted the way you would paste it.
+- **Built for agents.** A Claude Code skill, batch mode, JSON output, and
+  clear exit codes.
 
 ## Why
 
